@@ -1,5 +1,7 @@
 module github.com/polarismesh/polaris
 
+replace github.com/polarismesh/specification => github.com/wtifs/specification v0.0.0-20230831024849-64d2e8b00303
+
 go 1.20
 
 require (
