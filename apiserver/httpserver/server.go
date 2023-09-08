@@ -26,10 +26,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/emicklei/go-restful/v3"
+	restful "github.com/emicklei/go-restful/v3"
 	"github.com/gogo/protobuf/jsonpb"
 	"github.com/pkg/errors"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
 	"github.com/polarismesh/specification/source/go/api/v1/service_manage"
+	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	"go.uber.org/zap"
 
 	"github.com/polarismesh/polaris/admin"
@@ -51,6 +53,17 @@ import (
 	"github.com/polarismesh/polaris/plugin"
 	"github.com/polarismesh/polaris/service"
 	"github.com/polarismesh/polaris/service/healthcheck"
+)
+
+var (
+	cacheTypes = map[string]struct{}{
+		apiservice.DiscoverResponse_INSTANCE.String():        {},
+		apiservice.DiscoverResponse_ROUTING.String():         {},
+		apiservice.DiscoverResponse_RATE_LIMIT.String():      {},
+		apiservice.DiscoverResponse_CIRCUIT_BREAKER.String(): {},
+		apiservice.DiscoverResponse_FAULT_DETECTOR.String():  {},
+		apiservice.DiscoverResponse_SERVICES.String():        {},
+	}
 )
 
 // HTTPServer HTTP API服务器
@@ -127,6 +140,14 @@ func (h *HTTPServer) Initialize(_ context.Context, option map[string]interface{}
 	if whitelist := plugin.GetWhitelist(); whitelist != nil {
 		log.Infof("http server open the whitelist")
 		h.whitelist = whitelist
+	}
+
+	if raw, _ := option["enableCacheProto"].(bool); raw {
+		types := make([]string, 0, len(cacheTypes))
+		for k := range cacheTypes {
+			types = append(types, k)
+		}
+		httpcommon.InitProtoCache(option, types, discoverCacheConvert)
 	}
 
 	// tls 配置信息
@@ -275,8 +296,16 @@ func (h *HTTPServer) Stop() {
 	// 释放connLimit的数据，如果没有开启，也需要执行一下
 	// 目的：防止restart的时候，connLimit冲突
 	connlimit.RemoveLimitListener(h.GetProtocol())
+	// stop http server
 	if h.server != nil {
-		_ = h.server.Close()
+		// 延迟三秒，等待http server关闭，做到流量无损。
+		// 在此之前已经建立的链接，会正常执行业务，若执行时长超过3秒，则会抛出异常。
+		// 若是在3秒内提前处理完所有请求，h.server会提前关闭。
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := h.server.Shutdown(ctx); nil != err {
+			log.Errorf("httpserver shutdown failed, err: %v\n", err)
+		}
 	}
 }
 
@@ -619,4 +648,28 @@ func (h *HTTPServer) recoverFunc(i interface{}, w http.ResponseWriter) {
 
 	m := jsonpb.Marshaler{Indent: " ", EmitDefaults: true}
 	_ = m.Marshal(w, obj)
+}
+
+func discoverCacheConvert(m interface{}) *httpcommon.CacheObject {
+	resp, ok := m.(*apiservice.DiscoverResponse)
+	if !ok {
+		return nil
+	}
+	if resp.Code.GetValue() != uint32(apimodel.Code_ExecuteSuccess) {
+		return nil
+	}
+	if resp.GetService().GetRevision().GetValue() == "" {
+		return nil
+	}
+	if _, ok := cacheTypes[resp.GetType().String()]; !ok {
+		return nil
+	}
+	keyProto := fmt.Sprintf("%s-%s-%s", resp.GetService().GetNamespace().GetValue(),
+		resp.GetService().GetName().GetValue(), resp.GetService().GetRevision().GetValue())
+
+	return &httpcommon.CacheObject{
+		OriginVal: resp,
+		CacheType: resp.Type.String(),
+		Key:       keyProto,
+	}
 }

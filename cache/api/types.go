@@ -501,7 +501,7 @@ type BaseCache struct {
 	// this field can only make value on exec initialize/clean, and set it to false on exec update
 	firstUpdate bool
 	s           store.Store
-	// lastFetchTime 上次缓存刷新时间
+	// lastFetchTime 上次缓存获取（刷新）时间
 	lastFetchTime int64
 	// lastMtimes 数据最近一次修改时间
 	lastMtimes map[string]time.Time
