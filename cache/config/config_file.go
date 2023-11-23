@@ -18,10 +18,13 @@
 package config
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,7 +39,6 @@ import (
 	"github.com/polarismesh/polaris/store"
 )
 
-// FileCache 文件缓存，使用 loading cache 懒加载策略。同时写入时设置过期时间，定时清理过期的缓存。
 type fileCache struct {
 	*types.BaseCache
 	storage store.Store
@@ -168,7 +170,7 @@ func (fc *fileCache) setReleases(releases []*model.ConfigFileRelease) (map[strin
 		oldVal, _ := fc.releases.Get(item.Id)
 		if !item.Valid {
 			del++
-			if err := fc.handleDeleteRelease(oldVal, item); err != nil {
+			if err := fc.handleDeleteRelease(oldVal); err != nil {
 				return nil, update, del, err
 			}
 		} else {
@@ -180,7 +182,8 @@ func (fc *fileCache) setReleases(releases []*model.ConfigFileRelease) (map[strin
 
 		if item.Active {
 			configLog.Info("[Config][Release][Cache] notify config release change",
-				zap.Any("info", item.SimpleConfigFileRelease))
+				zap.String("namespace", item.Namespace), zap.String("group", item.Group),
+				zap.String("file", item.FileName), zap.Uint64("version", item.Version), zap.Bool("valid", item.Valid))
 			fc.sendEvent(item)
 		}
 	}
@@ -194,14 +197,21 @@ func (fc *fileCache) sendEvent(item *model.ConfigFileRelease) {
 	})
 	if err != nil {
 		configLog.Error("[Config][Release][Cache] notify config release change",
-			zap.Any("info", item.ConfigFileReleaseKey), zap.Error(err))
+			zap.String("namespace", item.Namespace), zap.String("group", item.Group),
+			zap.String("file", item.FileName), zap.Uint64("version", item.Version), zap.Error(err))
 	}
 }
 
 // handleUpdateRelease
 func (fc *fileCache) handleUpdateRelease(oldVal *model.SimpleConfigFileRelease, item *model.ConfigFileRelease) error {
-	fc.releases.Put(item.Id, item.SimpleConfigFileRelease)
+	// 如果ReleaseType类型变更， 先删除再保存
+	if oldVal != nil && oldVal.Typ != item.Typ {
+		if err := fc.handleDeleteRelease(oldVal); err != nil {
+			return err
+		}
+	}
 
+	fc.releases.Put(item.Id, item.SimpleConfigFileRelease)
 	func() {
 		// 记录 namespace -> group -> file_name -> []SimpleRelease 信息
 		if _, ok := fc.name2release.Load(item.Namespace); !ok {
@@ -213,8 +223,9 @@ func (fc *fileCache) handleUpdateRelease(oldVal *model.SimpleConfigFileRelease, 
 			namespace.Store(item.Group, utils.NewSyncMap[string, *utils.SyncMap[string, *model.SimpleConfigFileRelease]]())
 		}
 		group, _ := namespace.Load(item.Group)
-		group.Store(item.FileName, utils.NewSyncMap[string, *model.SimpleConfigFileRelease]())
-
+		_, _ = group.ComputeIfAbsent(item.FileName, func(k string) *utils.SyncMap[string, *model.SimpleConfigFileRelease] {
+			return utils.NewSyncMap[string, *model.SimpleConfigFileRelease]()
+		})
 		files, _ := group.Load(item.FileName)
 		files.Store(item.Name, item.SimpleConfigFileRelease)
 	}()
@@ -223,19 +234,17 @@ func (fc *fileCache) handleUpdateRelease(oldVal *model.SimpleConfigFileRelease, 
 		return nil
 	}
 
-	func() {
-		// 保存 active 状态的所有发布 release 信息
-		if _, ok := fc.activeReleases.Load(item.Namespace); !ok {
-			fc.activeReleases.Store(item.Namespace, utils.NewSyncMap[string,
-				*utils.SyncMap[string, *model.SimpleConfigFileRelease]]())
-		}
-		namespace, _ := fc.activeReleases.Load(item.Namespace)
-		if _, ok := namespace.Load(item.Group); !ok {
-			namespace.Store(item.Group, utils.NewSyncMap[string, *model.SimpleConfigFileRelease]())
-		}
-		group, _ := namespace.Load(item.Group)
-		group.Store(item.ActiveKey(), item.SimpleConfigFileRelease)
-	}()
+	// 保存 active 状态的所有发布 release 信息
+	if _, ok := fc.activeReleases.Load(item.Namespace); !ok {
+		fc.activeReleases.Store(item.Namespace, utils.NewSyncMap[string,
+			*utils.SyncMap[string, *model.SimpleConfigFileRelease]]())
+	}
+	namespace, _ := fc.activeReleases.Load(item.Namespace)
+	if _, ok := namespace.Load(item.Group); !ok {
+		namespace.Store(item.Group, utils.NewSyncMap[string, *model.SimpleConfigFileRelease]())
+	}
+	group, _ := namespace.Load(item.Group)
+	group.Store(item.ActiveKey(), item.SimpleConfigFileRelease)
 
 	if err := fc.valueCache.Update(func(tx *bbolt.Tx) error {
 		bucket, err := tx.CreateBucketIfNotExists([]byte(item.OwnerKey()))
@@ -250,48 +259,47 @@ func (fc *fileCache) handleUpdateRelease(oldVal *model.SimpleConfigFileRelease, 
 }
 
 // handleDeleteRelease
-func (fc *fileCache) handleDeleteRelease(oldVal *model.SimpleConfigFileRelease, item *model.ConfigFileRelease) error {
-	fc.releases.Del(item.Id)
-
+func (fc *fileCache) handleDeleteRelease(release *model.SimpleConfigFileRelease) error {
+	if release == nil {
+		return nil
+	}
+	fc.releases.Del(release.Id)
 	func() {
 		// 记录 namespace -> group -> file_name -> []SimpleRelease 信息
-		if _, ok := fc.name2release.Load(item.Namespace); !ok {
+		if _, ok := fc.name2release.Load(release.Namespace); !ok {
 			return
 		}
-		namespace, _ := fc.name2release.Load(item.Namespace)
-		if _, ok := namespace.Load(item.Group); !ok {
+		namespace, _ := fc.name2release.Load(release.Namespace)
+		if _, ok := namespace.Load(release.Group); !ok {
 			return
 		}
-		group, _ := namespace.Load(item.Group)
-		if _, ok := group.Load(item.FileName); !ok {
+		group, _ := namespace.Load(release.Group)
+		if _, ok := group.Load(release.FileName); !ok {
 			return
 		}
 
-		files, _ := group.Load(item.FileName)
-		files.Delete(item.Name)
+		files, _ := group.Load(release.FileName)
+		files.Delete(release.Name)
 
 		if files.Len() == 0 {
-			group.Delete(item.FileName)
+			group.Delete(release.FileName)
 		}
 	}()
 
-	if oldVal == nil {
+	if !release.Active {
 		return nil
 	}
-	if !oldVal.Active {
-		return nil
-	}
-	if namespace, ok := fc.activeReleases.Load(item.Namespace); ok {
-		if group, ok := namespace.Load(item.Group); ok {
-			group.Delete(item.ActiveKey())
+	if namespace, ok := fc.activeReleases.Load(release.Namespace); ok {
+		if group, ok := namespace.Load(release.Group); ok {
+			group.Delete(release.ActiveKey())
 		}
 	}
 	if err := fc.valueCache.Update(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket([]byte(item.OwnerKey()))
+		bucket := tx.Bucket([]byte(release.OwnerKey()))
 		if bucket == nil {
 			return nil
 		}
-		return bucket.Delete([]byte(item.ActiveKey()))
+		return bucket.Delete([]byte(release.ActiveKey()))
 	}); err != nil {
 		return errors.Join(err, errors.New("remove config_file content fail"))
 	}
@@ -310,6 +318,7 @@ func (fc *fileCache) postProcessUpdatedRelease(affect map[string]map[string]stru
 		}
 		nsMetric, _ := fc.metricsReleaseCount.Load(ns)
 		for group := range groups {
+			fc.reloadGroupRevisions(ns, group)
 			groupBucket, ok := nsBucket.Load(group)
 			if !ok {
 				continue
@@ -317,6 +326,33 @@ func (fc *fileCache) postProcessUpdatedRelease(affect map[string]map[string]stru
 			nsMetric.Store(group, uint64(groupBucket.Len()))
 		}
 	}
+}
+
+func (fc *fileCache) reloadGroupRevisions(namespace, group string) {
+	nsBucket, ok := fc.activeReleases.Load(namespace)
+	if !ok {
+		return
+	}
+	groupBucket, ok := nsBucket.Load(group)
+	if !ok {
+		return
+	}
+	revisions := make([]string, 0, groupBucket.Len())
+	groupBucket.Range(func(key string, val *model.SimpleConfigFileRelease) {
+		revisions = append(revisions, strconv.FormatUint(val.Version, 10))
+	})
+	h := sha1.New()
+	for i := range revisions {
+		if _, err := h.Write([]byte(revisions[i])); err != nil {
+			log.Error("[Cache][ConfigGroup] rebuild config-files revision", zap.Error(err))
+			return
+		}
+	}
+	nsRevisions, _ := fc.activeReleaseRevisions.ComputeIfAbsent(namespace,
+		func(k string) *utils.SyncMap[string, string] {
+			return utils.NewSyncMap[string, string]()
+		})
+	nsRevisions.Store(group, hex.EncodeToString(h.Sum(nil)))
 }
 
 func (fc *fileCache) LastMtime() time.Time {
@@ -342,7 +378,7 @@ func (fc *fileCache) Name() string {
 	return types.ConfigFileCacheName
 }
 
-// GetActiveRelease
+// GetGroupActiveReleases
 func (fc *fileCache) GetGroupActiveReleases(namespace, group string) ([]*model.ConfigFileRelease, string) {
 	nsBucket, ok := fc.activeReleases.Load(namespace)
 	if !ok {
@@ -353,11 +389,10 @@ func (fc *fileCache) GetGroupActiveReleases(namespace, group string) ([]*model.C
 		return nil, ""
 	}
 	ret := make([]*model.ConfigFileRelease, 0, 8)
-	groupBucket.Range(func(key string, val *model.SimpleConfigFileRelease) bool {
+	groupBucket.ReadRange(func(key string, val *model.SimpleConfigFileRelease) {
 		ret = append(ret, &model.ConfigFileRelease{
 			SimpleConfigFileRelease: val,
 		})
-		return true
 	})
 	groupRevisions, ok := fc.activeReleaseRevisions.Load(namespace)
 	if !ok {
@@ -368,7 +403,7 @@ func (fc *fileCache) GetGroupActiveReleases(namespace, group string) ([]*model.C
 }
 
 // GetActiveRelease
-func (fc *fileCache) GetActiveRelease(namespace, group, fileName string) *model.ConfigFileRelease {
+func (fc *fileCache) GetActiveRelease(namespace, group, fileName string, typ model.ReleaseType) *model.ConfigFileRelease {
 	nsBucket, ok := fc.activeReleases.Load(namespace)
 	if !ok {
 		return nil
@@ -381,6 +416,7 @@ func (fc *fileCache) GetActiveRelease(namespace, group, fileName string) *model.
 		Namespace: namespace,
 		Group:     group,
 		FileName:  fileName,
+		Typ:       typ,
 	}
 	simple, ok := groupBucket.Load(searchKey.ActiveKey())
 	if !ok {
@@ -431,46 +467,45 @@ func (fc *fileCache) QueryReleases(args *types.ConfigReleaseArgs) (uint32, []*mo
 	}
 
 	values := make([]*model.SimpleConfigFileRelease, 0, args.Limit)
-	fc.name2release.Range(func(namespace string, groups *utils.SyncMap[string, *utils.SyncMap[string,
-		*utils.SyncMap[string, *model.SimpleConfigFileRelease]]]) bool {
+	fc.name2release.ReadRange(func(namespace string, groups *utils.SyncMap[string, *utils.SyncMap[string,
+		*utils.SyncMap[string, *model.SimpleConfigFileRelease]]]) {
 
 		if args.Namespace != "" && utils.IsWildNotMatch(namespace, args.Namespace) {
-			return true
+			return
 		}
-		groups.Range(func(group string, files *utils.SyncMap[string, *utils.SyncMap[string,
-			*model.SimpleConfigFileRelease]]) bool {
+		groups.ReadRange(func(group string, files *utils.SyncMap[string, *utils.SyncMap[string,
+			*model.SimpleConfigFileRelease]]) {
 
 			if args.Group != "" && utils.IsWildNotMatch(group, args.Group) {
-				return true
+				return
 			}
-			files.Range(func(fileName string, releases *utils.SyncMap[string, *model.SimpleConfigFileRelease]) bool {
+			files.Range(func(fileName string, releases *utils.SyncMap[string, *model.SimpleConfigFileRelease]) {
 				if args.FileName != "" && utils.IsWildNotMatch(fileName, args.FileName) {
-					return true
+					return
 				}
-				releases.Range(func(releaseName string, item *model.SimpleConfigFileRelease) bool {
+				releases.Range(func(releaseName string, item *model.SimpleConfigFileRelease) {
 					if args.ReleaseName != "" && utils.IsWildNotMatch(item.Name, args.ReleaseName) {
-						return true
+						return
+					}
+					if !args.IncludeGray && item.Typ == model.ReleaseTypeGray {
+						return
 					}
 					if args.OnlyActive && !item.Active {
-						return true
+						return
 					}
 					if len(args.Metadata) > 0 {
 						for k, v := range args.Metadata {
 							sv := item.Metadata[k]
 							if sv != v {
-								return true
+								return
 							}
 						}
 					}
 
 					values = append(values, item)
-					return true
 				})
-				return true
 			})
-			return true
 		})
-		return true
 	})
 
 	sort.Slice(values, func(i, j int) bool {

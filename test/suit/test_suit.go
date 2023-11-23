@@ -25,12 +25,10 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/google/uuid"
 	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	apitraffic "github.com/polarismesh/specification/source/go/api/v1/traffic_manage"
 	bolt "go.etcd.io/bbolt"
@@ -39,7 +37,6 @@ import (
 	"github.com/polarismesh/polaris/auth"
 	_ "github.com/polarismesh/polaris/auth/defaultauth"
 	"github.com/polarismesh/polaris/cache"
-	cachetypes "github.com/polarismesh/polaris/cache/api"
 	api "github.com/polarismesh/polaris/common/api/v1"
 	"github.com/polarismesh/polaris/common/eventhub"
 	"github.com/polarismesh/polaris/common/log"
@@ -228,19 +225,6 @@ func (d *DiscoverTestSuit) loadConfig() error {
 		fmt.Printf("[ERROR] %v\n", err)
 		return err
 	}
-
-	resources := d.cfg.Cache.Resources
-	for i := range resources {
-		item := resources[i]
-		if item.Name == "configFile" {
-			item.Option = map[string]interface{}{
-				"cachePath": filepath.Join("/tmp/polaris/cache/", uuid.NewString()),
-			}
-		}
-		resources[i] = item
-	}
-	d.cfg.Cache.Resources = resources
-
 	return err
 }
 
@@ -371,22 +355,14 @@ func (d *DiscoverTestSuit) initialize(opts ...options) error {
 	if len(d.cfg.HealthChecks.LocalHost) == 0 {
 		d.cfg.HealthChecks.LocalHost = utils.LocalHost // 补充healthCheck的配置
 	}
-	healthCheckServer, err := healthcheck.TestInitialize(ctx, &d.cfg.HealthChecks, d.cfg.Cache.Open, bc, d.Storage)
+	healthCheckServer, err := healthcheck.TestInitialize(ctx, &d.cfg.HealthChecks, bc, d.Storage)
 	if err != nil {
 		panic(err)
 	}
 	healthcheck.SetServer(healthCheckServer)
 	d.healthCheckServer = healthCheckServer
-	cacheProvider, err := healthCheckServer.CacheProvider()
-	if err != nil {
-		panic(err)
-	}
 	healthCheckServer.SetServiceCache(cacheMgn.Service())
 	healthCheckServer.SetInstanceCache(cacheMgn.Instance())
-
-	// 为 instance 的 cache 添加 健康检查的 Listener
-	cacheMgn.AddListener(cachetypes.CacheInstance, []cachetypes.Listener{cacheProvider})
-	cacheMgn.AddListener(cachetypes.CacheClient, []cachetypes.Listener{cacheProvider})
 
 	val, originVal, err := service.TestInitialize(ctx, &d.cfg.Naming, &d.cfg.Cache, bc, cacheMgn, d.Storage, namespaceSvr,
 		healthCheckServer, userMgn, strategyMgn)

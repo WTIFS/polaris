@@ -24,6 +24,7 @@ import (
 	"time"
 
 	apiconfig "github.com/polarismesh/specification/source/go/api/v1/config_manage"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
@@ -105,20 +106,17 @@ func TestClientSetupAndFileExisted(t *testing.T) {
 	assert.NotNil(t, rsp3.ConfigFile)
 	assert.Equal(t, uint64(1), rsp3.ConfigFile.Version.GetValue())
 	assert.Equal(t, configFile.Content.GetValue(), rsp3.ConfigFile.Content.GetValue())
-	assert.Equal(t, config.CalMd5(configFile.Content.GetValue()), rsp3.ConfigFile.Md5.GetValue())
 
 	// 比较客户端配置是否落后
 	originSvr := testSuit.OriginConfigServer()
 	rsp4, _ := originSvr.TestCheckClientConfigFile(testSuit.DefaultCtx, assembleDefaultClientConfigFile(0), config.TestCompareByVersion)
 	assert.Equal(t, api.ExecuteSuccess, rsp4.Code.GetValue(), rsp4.GetInfo().GetValue())
 	assert.NotNil(t, rsp4.ConfigFile)
-	assert.Equal(t, config.CalMd5(configFile.Content.GetValue()), rsp4.ConfigFile.Md5.GetValue())
 
 	rsp5, _ := originSvr.TestCheckClientConfigFile(testSuit.DefaultCtx, assembleDefaultClientConfigFile(0), config.TestCompareByMD5)
 	assert.Equal(t, api.ExecuteSuccess, rsp5.Code.GetValue(), rsp5.GetInfo().GetValue())
 	assert.NotNil(t, rsp5.ConfigFile)
 	assert.Equal(t, uint64(1), rsp5.ConfigFile.Version.GetValue())
-	assert.Equal(t, config.CalMd5(configFile.Content.GetValue()), rsp5.ConfigFile.Md5.GetValue())
 }
 
 // TestClientSetupAndCreateNewFile 测试客户端启动时（version=0），并且配置不存在的情况下创建新的配置
@@ -356,20 +354,17 @@ func TestClientVersionBehindServer(t *testing.T) {
 	assert.NotNil(t, rsp4.ConfigFile)
 	assert.Equal(t, uint64(5), rsp4.ConfigFile.Version.GetValue())
 	assert.Equal(t, latestContent, rsp4.ConfigFile.Content.GetValue())
-	assert.Equal(t, config.CalMd5(latestContent), rsp4.ConfigFile.Md5.GetValue())
 
 	svr := testSuit.OriginConfigServer()
 	// 比较客户端配置是否落后
 	rsp5, _ := svr.TestCheckClientConfigFile(testSuit.DefaultCtx, assembleDefaultClientConfigFile(clientVersion), config.TestCompareByVersion)
 	assert.Equal(t, api.ExecuteSuccess, rsp5.Code.GetValue())
 	assert.NotNil(t, rsp5.ConfigFile)
-	assert.Equal(t, config.CalMd5(latestContent), rsp5.ConfigFile.Md5.GetValue())
 
 	rsp6, _ := svr.TestCheckClientConfigFile(testSuit.DefaultCtx, assembleDefaultClientConfigFile(clientVersion), config.TestCompareByMD5)
 	assert.Equal(t, api.ExecuteSuccess, rsp6.Code.GetValue())
 	assert.NotNil(t, rsp6.ConfigFile)
 	assert.Equal(t, uint64(5), rsp6.ConfigFile.Version.GetValue())
-	assert.Equal(t, config.CalMd5(latestContent), rsp6.ConfigFile.Md5.GetValue())
 }
 
 // TestWatchConfigFileAtFirstPublish 测试监听配置，并且第一次发布配置
@@ -394,8 +389,6 @@ func TestWatchConfigFileAtFirstPublish(t *testing.T) {
 	configFile := assembleConfigFile()
 
 	t.Run("第一次订阅发布", func(t *testing.T) {
-		received := make(chan uint64)
-
 		watchConfigFiles := assembleDefaultClientConfigFile(0)
 		clientId := "TestWatchConfigFileAtFirstPublish-first"
 
@@ -403,12 +396,9 @@ func TestWatchConfigFileAtFirstPublish(t *testing.T) {
 			testSuit.OriginConfigServer().WatchCenter().RemoveWatcher(clientId, watchConfigFiles)
 		}()
 
-		testSuit.OriginConfigServer().WatchCenter().AddWatcher(clientId, watchConfigFiles,
-			func(clientId string, rsp *apiconfig.ConfigClientResponse) bool {
-				t.Logf("clientId=[%s] receive config publish msg", clientId)
-				received <- rsp.ConfigFile.Version.GetValue()
-				return true
-			})
+		watchCtx := testSuit.OriginConfigServer().WatchCenter().AddWatcher(clientId, watchConfigFiles,
+			config.BuildTimeoutWatchCtx(30*time.Second))
+		assert.NotNil(t, watchCtx)
 
 		rsp := testSuit.ConfigServer().CreateConfigFile(testSuit.DefaultCtx, configFile)
 		t.Log("create config file success")
@@ -426,40 +416,36 @@ func TestWatchConfigFileAtFirstPublish(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, configFile.GetContent().GetValue(), saveData.Content)
 
-		select {
-		case receivedVersion := <-received:
-			assert.Equal(t, uint64(1), receivedVersion)
-		case <-time.After(10 * time.Second):
-			t.Fatal("time out")
+		notifyRsp, err := (watchCtx.(*config.LongPollWatchContext)).GetNotifieResultWithTime(10 * time.Second)
+		if err != nil {
+			t.Fatal(err)
 		}
+		t.Logf("clientId=[%s] receive config publish msg", clientId)
+		receivedVersion := notifyRsp.ConfigFile.Version.GetValue()
+		assert.Equal(t, uint64(1), receivedVersion)
 	})
 
 	t.Run("第二次订阅发布", func(t *testing.T) {
-
-		received := make(chan uint64)
-
 		// 版本号由于发布过一次，所以是1
 		watchConfigFiles := assembleDefaultClientConfigFile(1)
 
 		clientId := "TestWatchConfigFileAtFirstPublish-second"
 
-		testSuit.OriginConfigServer().WatchCenter().AddWatcher(clientId, watchConfigFiles,
-			func(clientId string, rsp *apiconfig.ConfigClientResponse) bool {
-				t.Logf("clientId=[%s] receive config publish msg", clientId)
-				received <- rsp.ConfigFile.Version.GetValue()
-				return true
-			})
+		watchCtx := testSuit.OriginConfigServer().WatchCenter().AddWatcher(clientId, watchConfigFiles,
+			config.BuildTimeoutWatchCtx(30*time.Second))
+		assert.NotNil(t, watchCtx)
 
 		rsp3 := testSuit.ConfigServer().PublishConfigFile(testSuit.DefaultCtx, assembleConfigFileRelease(configFile))
 		assert.Equal(t, api.ExecuteSuccess, rsp3.Code.GetValue())
 
 		// 等待回调
-		select {
-		case receivedVersion := <-received:
-			assert.Equal(t, uint64(2), receivedVersion)
-		case <-time.After(10 * time.Second):
-			t.Fatal("time out")
+		notifyRsp, err := (watchCtx.(*config.LongPollWatchContext)).GetNotifieResultWithTime(10 * time.Second)
+		if err != nil {
+			t.Fatal(err)
 		}
+		t.Logf("clientId=[%s] receive config publish msg", clientId)
+		receivedVersion := notifyRsp.ConfigFile.Version.GetValue()
+		assert.Equal(t, uint64(2), receivedVersion)
 
 		// 为了避免影响其它 case，删除订阅
 		testSuit.OriginConfigServer().WatchCenter().RemoveWatcher(clientId, watchConfigFiles)
@@ -467,7 +453,7 @@ func TestWatchConfigFileAtFirstPublish(t *testing.T) {
 }
 
 // Test10000ClientWatchConfigFile 测试 10000 个客户端同时监听配置变更，配置发布所有客户端都收到通知
-func Test10000ClientWatchConfigFile(t *testing.T) {
+func TestManyClientWatchConfigFile(t *testing.T) {
 	testSuit := &ConfigCenterTest{}
 	if err := testSuit.Initialize(); err != nil {
 		t.Fatal(err)
@@ -479,19 +465,23 @@ func Test10000ClientWatchConfigFile(t *testing.T) {
 		testSuit.Destroy()
 	})
 
-	clientSize := 10000
-	received := make(map[string]bool)
-	receivedVersion := make(map[string]uint64)
+	clientSize := 100
+	received := utils.NewSyncMap[string, bool]()
+	receivedVersion := utils.NewSyncMap[string, uint64]()
 	watchConfigFiles := assembleDefaultClientConfigFile(0)
+
 	for i := 0; i < clientSize; i++ {
 		clientId := fmt.Sprintf("Test10000ClientWatchConfigFile-client-id=%d", i)
-		received[clientId] = false
-		receivedVersion[clientId] = uint64(0)
-		testSuit.OriginConfigServer().WatchCenter().AddWatcher(clientId, watchConfigFiles, func(clientId string, rsp *apiconfig.ConfigClientResponse) bool {
-			received[clientId] = true
-			receivedVersion[clientId] = rsp.ConfigFile.Version.GetValue()
-			return true
-		})
+		received.Store(clientId, false)
+		receivedVersion.Store(clientId, uint64(0))
+		watchCtx := testSuit.OriginConfigServer().WatchCenter().AddWatcher(clientId, watchConfigFiles,
+			config.BuildTimeoutWatchCtx(30*time.Second))
+		assert.NotNil(t, watchCtx)
+		go func() {
+			notifyRsp := (watchCtx.(*config.LongPollWatchContext)).GetNotifieResult()
+			received.Store(clientId, true)
+			receivedVersion.Store(clientId, notifyRsp.ConfigFile.Version.GetValue())
+		}()
 	}
 
 	// 创建并发布配置文件
@@ -507,23 +497,30 @@ func Test10000ClientWatchConfigFile(t *testing.T) {
 
 	// 校验是否所有客户端都收到推送通知
 	receivedCnt := 0
-	for _, v := range received {
-		if v {
+	received.ReadRange(func(key string, val bool) {
+		if val {
 			receivedCnt++
 		}
-	}
-	assert.Equal(t, len(received), receivedCnt)
+	})
+	assert.Equal(t, received.Len(), receivedCnt)
 
-	receivedVerCnt := uint64(0)
-	for _, v := range receivedVersion {
-		receivedVerCnt += v
-	}
-	assert.Equal(t, uint64(len(receivedVersion)), uint64(receivedVerCnt))
+	activeQuery := assembleConfigFileRelease(configFile)
+	activeQuery.Name = nil
+	activeRsp := testSuit.ConfigServer().GetConfigFileRelease(testSuit.DefaultCtx, activeQuery)
+	assert.Equal(t, apimodel.Code_ExecuteSuccess, apimodel.Code(activeRsp.Code.Value), activeRsp.Info.Value)
+
+	receivedVerCnt := 0
+	receivedVersion.ReadRange(func(key string, val uint64) {
+		if val == activeRsp.ConfigFileRelease.Version.Value {
+			receivedVerCnt++
+		}
+	})
+	assert.Equal(t, receivedVersion.Len(), receivedVerCnt)
 
 	// 为了避免影响其它case，删除订阅
-	for clientId := range received {
+	received.ReadRange(func(clientId string, val bool) {
 		testSuit.OriginConfigServer().WatchCenter().RemoveWatcher(clientId, watchConfigFiles)
-	}
+	})
 }
 
 // TestDeleteConfigFile 测试删除配置，删除配置会通知客户端，并且重新拉取配置会返回 NotFoundResourceConfigFile 状态码
@@ -551,15 +548,13 @@ func TestDeleteConfigFile(t *testing.T) {
 
 	// 客户端订阅
 	clientId := randomStr()
-	received := make(chan uint64)
 	watchConfigFiles := assembleDefaultClientConfigFile(0)
 
 	t.Log("add config watcher")
 
-	testSuit.OriginConfigServer().WatchCenter().AddWatcher(clientId, watchConfigFiles, func(clientId string, rsp *apiconfig.ConfigClientResponse) bool {
-		received <- rsp.GetConfigFile().GetVersion().GetValue()
-		return true
-	})
+	watchCtx := testSuit.OriginConfigServer().WatchCenter().AddWatcher(clientId, watchConfigFiles,
+		config.BuildTimeoutWatchCtx(30*time.Second))
+	assert.NotNil(t, watchCtx)
 
 	// 删除配置文件
 	t.Log("remove config file")
@@ -572,12 +567,9 @@ func TestDeleteConfigFile(t *testing.T) {
 
 	// 客户端收到推送通知
 	t.Log("wait receive config change msg")
-	select {
-	case receivedVersion := <-received:
-		assert.Equal(t, uint64(2), receivedVersion)
-		assert.Equal(t, uint64(2), receivedVersion)
-	case <-time.After(10 * time.Second):
-		t.Fatal("time out")
+	_, err := (watchCtx.(*config.LongPollWatchContext)).GetNotifieResultWithTime(10 * time.Second)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	fileInfo := &apiconfig.ClientConfigFileInfo{

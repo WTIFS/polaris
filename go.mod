@@ -1,8 +1,8 @@
 module github.com/polarismesh/polaris
 
-replace github.com/polarismesh/specification => github.com/wtifs/specification v0.0.0-20230831024849-64d2e8b00303
+replace github.com/polarismesh/specification => github.com/wtifs/specification v1.4.1-bbr
 
-go 1.20
+go 1.21
 
 require (
 	github.com/BurntSushi/toml v1.2.0

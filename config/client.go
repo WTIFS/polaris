@@ -20,6 +20,7 @@ package config
 import (
 	"context"
 	"encoding/base64"
+	"time"
 
 	apiconfig "github.com/polarismesh/specification/source/go/api/v1/config_manage"
 	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
@@ -33,7 +34,7 @@ import (
 )
 
 type (
-	compareFunction func(clientInfo *apiconfig.ClientConfigFileInfo, file *model.ConfigFileRelease) bool
+	CompareFunction func(clientInfo *apiconfig.ClientConfigFileInfo, file *model.ConfigFileRelease) bool
 )
 
 // GetConfigFileForClient 从缓存中获取配置文件，如果客户端的版本号大于服务端，则服务端重新加载缓存
@@ -43,18 +44,44 @@ func (s *Server) GetConfigFileForClient(ctx context.Context,
 	group := client.GetGroup().GetValue()
 	fileName := client.GetFileName().GetValue()
 	clientVersion := client.GetVersion().GetValue()
+	configFileTags := client.GetTags()
 
 	if namespace == "" || group == "" || fileName == "" {
 		return api.NewConfigClientResponseWithInfo(
 			apimodel.Code_BadRequest, "namespace & group & fileName can not be empty")
 	}
-	// 从缓存中获取配置内容
-	release := s.fileCache.GetActiveRelease(namespace, group, fileName)
-	if release == nil {
-		return api.NewConfigClientResponse(apimodel.Code_NotFoundResource, nil)
+	// 从缓存中获取灰度文件
+	var release *model.ConfigFileRelease
+	var match bool
+	if len(configFileTags) > 0 {
+		release = s.fileCache.GetActiveRelease(namespace, group, fileName, model.ReleaseTypeGray)
+		if release != nil {
+			key := model.GetGrayConfigRealseKey(release.SimpleConfigFileRelease)
+			if grayRule := s.grayCache.GetGrayRule(key); grayRule == nil {
+				log.Error("[Config][Service] get config file not find gray rule",
+					utils.RequestID(ctx), zap.String("file", fileName))
+			} else {
+				tags := make([]*apimodel.Tag, 0, len(configFileTags))
+				for _, item := range configFileTags {
+					tag := &apimodel.Tag{
+						Key:   item.Key,
+						Value: item.Value,
+					}
+					tags = append(tags, tag)
+				}
+				if ok := utils.Match(grayRule, tags); ok {
+					match = true
+				}
+			}
+		}
 	}
-
-	// 客户端版本号大于服务端版本号，服务端不返回变更
+	if !match {
+		release = s.fileCache.GetActiveRelease(namespace, group, fileName, model.ReleaseTypeFull)
+		if release == nil {
+			return api.NewConfigClientResponse(apimodel.Code_NotFoundResource, nil)
+		}
+	}
+	// 客户端版本号大于服务端版本号，服务端不返回变更 todo: 结合灰度和全量版本 判断
 	if clientVersion > release.Version {
 		return api.NewConfigClientResponse(apimodel.Code_DataNoChange, nil)
 	}
@@ -63,10 +90,18 @@ func (s *Server) GetConfigFileForClient(ctx context.Context,
 		log.Error("[Config][Service] get config file to client info", utils.RequestID(ctx), zap.Error(err))
 		return api.NewConfigClientResponseWithInfo(apimodel.Code_ExecuteException, err.Error())
 	}
-	log.Info("[Config][Client] client get config file success.", utils.RequestID(ctx),
-		zap.String("client", utils.ParseClientAddress(ctx)), zap.String("file", fileName),
-		zap.Uint64("version", release.Version))
 	return api.NewConfigClientResponse(apimodel.Code_ExecuteSuccess, configFile)
+}
+
+// UpsertAndReleaseConfigFile 创建/更新配置文件并发布
+func (s *Server) UpsertAndReleaseConfigFileFromClient(ctx context.Context,
+	req *apiconfig.ConfigFilePublishInfo) *apiconfig.ConfigResponse {
+	return s.UpsertAndReleaseConfigFile(ctx, req)
+}
+
+// DeleteConfigFileFromClient 调用config_file的方法更新配置文件
+func (s *Server) DeleteConfigFileFromClient(ctx context.Context, req *apiconfig.ConfigFile) *apiconfig.ConfigResponse {
+	return s.DeleteConfigFile(ctx, req)
 }
 
 // CreateConfigFileFromClient 调用config_file接口获取配置文件
@@ -90,24 +125,45 @@ func (s *Server) PublishConfigFileFromClient(ctx context.Context,
 	return api.NewConfigClientResponseFromConfigResponse(configResponse)
 }
 
-func (s *Server) WatchConfigFiles(ctx context.Context,
+// LongPullWatchFile .
+func (s *Server) LongPullWatchFile(ctx context.Context,
 	req *apiconfig.ClientWatchConfigFileRequest) (WatchCallback, error) {
-
 	watchFiles := req.GetWatchFiles()
-	// 2. 检查客户端是否有版本落后
-	resp, needWatch := s.checkClientConfigFile(ctx, watchFiles, compareByVersion)
-	if !needWatch {
+
+	tmpWatchCtx := BuildTimeoutWatchCtx(0)("")
+	for _, file := range watchFiles {
+		tmpWatchCtx.AppendInterest(file)
+	}
+	if quickResp := s.watchCenter.checkQuickResponseClient(tmpWatchCtx); quickResp != nil {
+		_ = tmpWatchCtx.Close()
 		return func() *apiconfig.ConfigClientResponse {
-			return resp
+			return quickResp
 		}, nil
+	}
+
+	watchTimeOut := defaultLongPollingTimeout
+	if timeoutVal, ok := ctx.Value(utils.WatchTimeoutCtx{}).(time.Duration); ok {
+		watchTimeOut = timeoutVal
 	}
 
 	// 3. 监听配置变更，hold 请求 30s，30s 内如果有配置发布，则响应请求
 	clientId := utils.ParseClientAddress(ctx) + "@" + utils.NewUUID()[0:8]
-	finishChan := s.ConnManager().AddConn(clientId, watchFiles)
+	watchCtx := s.WatchCenter().AddWatcher(clientId, watchFiles, BuildTimeoutWatchCtx(watchTimeOut))
 	return func() *apiconfig.ConfigClientResponse {
-		return <-finishChan
+		return (watchCtx.(*LongPollWatchContext)).GetNotifieResult()
 	}, nil
+}
+
+func BuildTimeoutWatchCtx(watchTimeOut time.Duration) WatchContextFactory {
+	return func(clientId string) WatchContext {
+		watchCtx := &LongPollWatchContext{
+			clientId:         clientId,
+			finishTime:       time.Now().Add(watchTimeOut),
+			finishChan:       make(chan *apiconfig.ConfigClientResponse),
+			watchConfigFiles: map[string]*apiconfig.ClientConfigFileInfo{},
+		}
+		return watchCtx
+	}
 }
 
 // GetConfigFileNamesWithCache
@@ -152,16 +208,16 @@ func (s *Server) GetConfigFileNamesWithCache(ctx context.Context,
 	}
 }
 
-func compareByVersion(clientInfo *apiconfig.ClientConfigFileInfo, file *model.ConfigFileRelease) bool {
+func CompareByVersion(clientInfo *apiconfig.ClientConfigFileInfo, file *model.ConfigFileRelease) bool {
 	return clientInfo.GetVersion().GetValue() < file.Version
 }
 
-func compareByMD5(clientInfo *apiconfig.ClientConfigFileInfo, file *model.ConfigFileRelease) bool {
+func CompareByMD5(clientInfo *apiconfig.ClientConfigFileInfo, file *model.ConfigFileRelease) bool {
 	return clientInfo.Md5.GetValue() != file.Md5
 }
 
 func (s *Server) checkClientConfigFile(ctx context.Context, files []*apiconfig.ClientConfigFileInfo,
-	compartor compareFunction) (*apiconfig.ConfigClientResponse, bool) {
+	compartor CompareFunction) (*apiconfig.ConfigClientResponse, bool) {
 	if len(files) == 0 {
 		return api.NewConfigClientResponse(apimodel.Code_InvalidWatchConfigFileFormat, nil), false
 	}
@@ -175,7 +231,7 @@ func (s *Server) checkClientConfigFile(ctx context.Context, files []*apiconfig.C
 				"namespace & group & fileName can not be empty"), false
 		}
 		// 从缓存中获取最新的配置文件信息
-		release := s.fileCache.GetActiveRelease(namespace, group, fileName)
+		release := s.fileCache.GetActiveRelease(namespace, group, fileName, model.ReleaseTypeFull)
 		if release != nil && compartor(configFile, release) {
 			ret := &apiconfig.ClientConfigFileInfo{
 				Namespace: utils.NewStringValue(namespace),

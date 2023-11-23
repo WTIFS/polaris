@@ -25,10 +25,15 @@ import (
 	apisecurity "github.com/polarismesh/specification/source/go/api/v1/security"
 	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	apitraffic "github.com/polarismesh/specification/source/go/api/v1/traffic_manage"
+	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
 
 	"github.com/polarismesh/polaris/common/metrics"
 	"github.com/polarismesh/polaris/common/model"
 	"github.com/polarismesh/polaris/store"
+)
+
+const (
+	AllMatched = "*"
 )
 
 const (
@@ -58,6 +63,10 @@ const (
 	UsersName = "users"
 	// StrategyRuleName strategy rule config name
 	StrategyRuleName = "strategyRule"
+	// ServiceContractName service contract config name
+	ServiceContractName = "serviceContract"
+	// GrayName gray config name
+	GrayName = "gray"
 )
 
 type CacheIndex int
@@ -78,6 +87,8 @@ const (
 	CacheConfigFile
 	CacheFaultDetector
 	CacheConfigGroup
+	CacheServiceContract
+	CacheGray
 
 	CacheLast
 )
@@ -86,8 +97,6 @@ const (
 type Cache interface {
 	// Initialize
 	Initialize(c map[string]interface{}) error
-	// AddListener 添加
-	AddListener(listeners []Listener)
 	// Update .
 	Update() error
 	// Clear .
@@ -110,12 +119,14 @@ type (
 	// NamespaceCache 命名空间的 Cache 接口
 	NamespaceCache interface {
 		Cache
-		// GetNamespace
+		// GetNamespace get target namespace by id
 		GetNamespace(id string) *model.Namespace
-		// GetNamespacesByName
+		// GetNamespacesByName list all namespace by name
 		GetNamespacesByName(names []string) []*model.Namespace
-		// GetNamespaceList
+		// GetNamespaceList list all namespace
 		GetNamespaceList() []*model.Namespace
+		// GetVisibleNamespaces list target namespace can visible other namespaces
+		GetVisibleNamespaces(namespace string) []*model.Namespace
 	}
 )
 
@@ -178,6 +189,8 @@ type (
 		GetAliasFor(name string, namespace string) *model.Service
 		// GetRevisionWorker .
 		GetRevisionWorker() ServiceRevisionWorker
+		// GetVisibleServicesInOtherNamespace get same service in other namespace and it's visible
+		GetVisibleServicesInOtherNamespace(name string, namespace string) []*model.Service
 	}
 
 	// ServiceRevisionWorker
@@ -188,6 +201,15 @@ type (
 		GetServiceRevisionCount() int
 		// GetServiceInstanceRevision
 		GetServiceInstanceRevision(serviceID string) string
+	}
+
+	// ServiceContractCache .
+	ServiceContractCache interface {
+		Cache
+		// Query .
+		Query(filter map[string]string, offset, limit uint32) ([]*model.EnrichServiceContract, uint32, error)
+		// ListVersions .
+		ListVersions(service, namespace string) []*model.EnrichServiceContract
 	}
 )
 
@@ -217,6 +239,8 @@ type (
 		GetInstanceLabels(serviceID string) *apiservice.InstanceLabels
 		// QueryInstances query instance for OSS
 		QueryInstances(filter, metaFilter map[string]string, offset, limit uint32) (uint32, []*model.Instance, error)
+		// DiscoverServiceInstances 服务发现获取实例
+		DiscoverServiceInstances(serviceID string, onlyHealthy bool) []*model.Instance
 	}
 )
 
@@ -383,6 +407,8 @@ type (
 		ReleaseName string
 		// OnlyActive
 		OnlyActive bool
+		// IncludeGray 是否包含灰度文件，默认不包括
+		IncludeGray bool
 		// Metadata
 		Metadata map[string]string
 		// NoPage
@@ -420,8 +446,7 @@ type (
 		Cache
 		// GetActiveRelease
 		GetGroupActiveReleases(namespace, group string) ([]*model.ConfigFileRelease, string)
-		// GetActiveRelease
-		GetActiveRelease(namespace, group, fileName string) *model.ConfigFileRelease
+		GetActiveRelease(namespace, group, fileName string, typ model.ReleaseType) *model.ConfigFileRelease
 		// GetRelease
 		GetRelease(key model.ConfigFileReleaseKey) *model.ConfigFileRelease
 		// QueryReleases
@@ -490,13 +515,12 @@ var (
 // BaseCache 对于 Cache 中的一些 func 做统一实现，避免重复逻辑
 type BaseCache struct {
 	lock sync.RWMutex
-	// firtstUpdate Whether the cache is loaded for the first time
+	// firstUpdate Whether the cache is loaded for the first time
 	// this field can only make value on exec initialize/clean, and set it to false on exec update
-	firtstUpdate  bool
+	firstUpdate   bool
 	s             store.Store
 	lastFetchTime int64
 	lastMtimes    map[string]time.Time
-	Manager       *ListenerManager
 	CacheMgr      CacheManager
 }
 
@@ -515,14 +539,17 @@ func (bc *BaseCache) initialize() {
 	defer bc.lock.Unlock()
 
 	bc.lastFetchTime = 1
-	bc.firtstUpdate = true
-	bc.Manager = NewListenerManager()
+	bc.firstUpdate = true
 	bc.lastMtimes = map[string]time.Time{}
 }
 
 var (
 	zeroTime = time.Unix(0, 0)
 )
+
+func (bc *BaseCache) Store() store.Store {
+	return bc.s
+}
 
 func (bc *BaseCache) ResetLastMtime(label string) {
 	bc.lock.Lock()
@@ -564,7 +591,7 @@ func (bc *BaseCache) OriginLastFetchTime() time.Time {
 }
 
 func (bc *BaseCache) IsFirstUpdate() bool {
-	return bc.firtstUpdate
+	return bc.firstUpdate
 }
 
 // update
@@ -610,7 +637,7 @@ func (bc *BaseCache) DoCacheUpdate(name string, executor func() (map[string]time
 	if total >= 0 {
 		metrics.RecordCacheUpdateCost(time.Since(start), name, total)
 	}
-	bc.firtstUpdate = false
+	bc.firstUpdate = false
 	return nil
 }
 
@@ -619,16 +646,17 @@ func (bc *BaseCache) Clear() {
 	defer bc.lock.Unlock()
 	bc.lastMtimes = make(map[string]time.Time)
 	bc.lastFetchTime = 1
-	bc.firtstUpdate = true
-}
-
-// AddListener 添加
-func (bc *BaseCache) AddListener(listeners []Listener) {
-	bc.lock.Lock()
-	defer bc.lock.Unlock()
-	bc.Manager.Append(listeners...)
+	bc.firstUpdate = true
 }
 
 func (bc *BaseCache) Close() error {
 	return nil
 }
+
+type (
+	// GrayCache 灰度 Cache 接口
+	GrayCache interface {
+		Cache
+		GetGrayRule(name string) *apimodel.MatchTerm
+	}
+)

@@ -79,9 +79,12 @@ func (chain *CryptoConfigFileChain) BeforeCreateFile(ctx context.Context,
 // AfterCreateFile
 func (chain *CryptoConfigFileChain) AfterGetFile(ctx context.Context,
 	file *model.ConfigFile) (*model.ConfigFile, error) {
-
 	encryptAlgo := file.GetEncryptAlgo()
 	dataKey := file.GetEncryptDataKey()
+	if file.IsEncrypted() {
+		file.Encrypt = true
+	}
+
 	plainContent, err := chain.decryptConfigFileContent(dataKey, encryptAlgo, file.Content)
 
 	// TODO: 这个逻辑需要优化，在1.17.3处理
@@ -268,15 +271,21 @@ func (chain *ReleaseConfigFileChain) AfterGetFile(ctx context.Context,
 	namespace := file.Namespace
 	group := file.Group
 	name := file.Name
-
-	// 填充发布信息
-	activeFile := chain.svr.fileCache.GetActiveRelease(namespace, group, name)
-	if activeFile != nil {
+	// 首先检测灰度版本
+	if grayFile := chain.svr.fileCache.GetActiveRelease(namespace, group, name, model.ReleaseTypeGray); grayFile != nil {
+		if grayFile.Content == file.OriginContent {
+			file.Status = utils.ReleaseTypeGray
+			file.ReleaseBy = grayFile.ModifyBy
+			file.ReleaseTime = grayFile.ModifyTime
+		} else {
+			file.Status = utils.ReleaseStatusToRelease
+		}
+	} else if fullFile := chain.svr.fileCache.GetActiveRelease(namespace, group, name, model.ReleaseTypeFull); fullFile != nil {
 		// 如果最后一次发布的内容和当前文件内容一致，则展示最后一次发布状态。否则说明文件有修改，待发布
-		if activeFile.Content == file.OriginContent {
+		if fullFile.Content == file.OriginContent {
 			file.Status = utils.ReleaseTypeNormal
-			file.ReleaseBy = activeFile.ModifyBy
-			file.ReleaseTime = activeFile.ModifyTime
+			file.ReleaseBy = fullFile.ModifyBy
+			file.ReleaseTime = fullFile.ModifyTime
 		} else {
 			file.Status = utils.ReleaseStatusToRelease
 		}

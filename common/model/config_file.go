@@ -18,12 +18,23 @@
 package model
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/polarismesh/specification/source/go/api/v1/config_manage"
 
 	commontime "github.com/polarismesh/polaris/common/time"
 	"github.com/polarismesh/polaris/common/utils"
+)
+
+type ReleaseType uint32
+
+const (
+	_ ReleaseType = iota
+	// ReleaseTypeFull 全量类型
+	ReleaseTypeFull
+	// ReleaseTypeGray 灰度类型
+	ReleaseTypeGray
 )
 
 /** ----------- DataObject ------------- */
@@ -49,6 +60,10 @@ type ConfigFileKey struct {
 	Name      string
 	Namespace string
 	Group     string
+}
+
+func (c ConfigFileKey) String() string {
+	return c.Namespace + "@" + c.Group + "@" + c.Name
 }
 
 // ConfigFile 配置文件数据持久化对象
@@ -123,6 +138,7 @@ type ConfigFileReleaseKey struct {
 	Namespace string
 	Group     string
 	FileName  string
+	Typ       ReleaseType
 }
 
 func (c ConfigFileReleaseKey) ToFileKey() *ConfigFileKey {
@@ -133,16 +149,23 @@ func (c ConfigFileReleaseKey) ToFileKey() *ConfigFileKey {
 	}
 }
 
-func (c ConfigFileReleaseKey) OwnerKey() string {
+func (c *ConfigFileReleaseKey) OwnerKey() string {
 	return c.Namespace + "@" + c.Group
 }
 
 func (c ConfigFileReleaseKey) ActiveKey() string {
-	return c.Namespace + "@" + c.Group + "@" + c.FileName
+	return fmt.Sprintf("%v@%v@%v@%v", c.Namespace, c.Group, c.FileName, c.Typ)
 }
 
 func (c ConfigFileReleaseKey) ReleaseKey() string {
-	return c.Namespace + "@" + c.Group + "@" + c.FileName + "@" + c.Name
+	return fmt.Sprintf("%v@%v@%v@%v", c.Namespace, c.Group, c.FileName, c.Name)
+}
+
+// BuildKeyForClientConfigFileInfo 必须保证和 ConfigFileReleaseKey 是一样的生成规则
+func BuildKeyForClientConfigFileInfo(info *config_manage.ClientConfigFileInfo) string {
+	key := info.GetNamespace().GetValue() + "@" +
+		info.GetGroup().GetValue() + "@" + info.GetFileName().GetValue()
+	return key
 }
 
 // SimpleConfigFileRelease 配置文件发布数据持久化对象
@@ -163,16 +186,27 @@ type SimpleConfigFileRelease struct {
 	ReleaseDescription string
 }
 
-func (s SimpleConfigFileRelease) GetEncryptDataKey() string {
+func (s *SimpleConfigFileRelease) GetEncryptDataKey() string {
 	return s.Metadata[utils.ConfigFileTagKeyDataKey]
 }
 
-func (s SimpleConfigFileRelease) GetEncryptAlgo() string {
+func (s *SimpleConfigFileRelease) GetEncryptAlgo() string {
 	return s.Metadata[utils.ConfigFileTagKeyEncryptAlgo]
 }
 
-func (s SimpleConfigFileRelease) IsEncrypted() bool {
+func (s *SimpleConfigFileRelease) IsEncrypted() bool {
 	return s.GetEncryptDataKey() != ""
+}
+
+func (s *SimpleConfigFileRelease) ToSpecNotifyClientRequest() *config_manage.ClientConfigFileInfo {
+	return &config_manage.ClientConfigFileInfo{
+		Namespace: utils.NewStringValue(s.Namespace),
+		Group:     utils.NewStringValue(s.Group),
+		FileName:  utils.NewStringValue(s.FileName),
+		Name:      utils.NewStringValue(s.Name),
+		Md5:       utils.NewStringValue(s.Md5),
+		Version:   utils.NewUInt64Value(s.Version),
+	}
 }
 
 // ConfigFileReleaseHistory 配置文件发布历史记录数据持久化对象
@@ -324,6 +358,8 @@ func ToConfiogFileReleaseApi(release *ConfigFileRelease) *config_manage.ConfigFi
 		ModifyTime:         utils.NewStringValue(commontime.Time2String(release.ModifyTime)),
 		ReleaseDescription: utils.NewStringValue(release.ReleaseDescription),
 		Tags:               FromTagMap(release.Metadata),
+		Active:             utils.NewBoolValue(release.Active),
+		Type:               utils.NewUInt32Value(uint32(release.Typ)),
 	}
 }
 
@@ -384,22 +420,24 @@ func ToReleaseHistoryAPI(releaseHistory *ConfigFileReleaseHistory) *config_manag
 		return nil
 	}
 	return &config_manage.ConfigFileReleaseHistory{
-		Id:         utils.NewUInt64Value(releaseHistory.Id),
-		Name:       utils.NewStringValue(releaseHistory.Name),
-		Namespace:  utils.NewStringValue(releaseHistory.Namespace),
-		Group:      utils.NewStringValue(releaseHistory.Group),
-		FileName:   utils.NewStringValue(releaseHistory.FileName),
-		Content:    utils.NewStringValue(releaseHistory.Content),
-		Comment:    utils.NewStringValue(releaseHistory.Comment),
-		Format:     utils.NewStringValue(releaseHistory.Format),
-		Tags:       FromTagMap(releaseHistory.Metadata),
-		Md5:        utils.NewStringValue(releaseHistory.Md5),
-		Type:       utils.NewStringValue(releaseHistory.Type),
-		Status:     utils.NewStringValue(releaseHistory.Status),
-		CreateBy:   utils.NewStringValue(releaseHistory.CreateBy),
-		CreateTime: utils.NewStringValue(commontime.Time2String(releaseHistory.CreateTime)),
-		ModifyBy:   utils.NewStringValue(releaseHistory.ModifyBy),
-		ModifyTime: utils.NewStringValue(commontime.Time2String(releaseHistory.ModifyTime)),
+		Id:                 utils.NewUInt64Value(releaseHistory.Id),
+		Name:               utils.NewStringValue(releaseHistory.Name),
+		Namespace:          utils.NewStringValue(releaseHistory.Namespace),
+		Group:              utils.NewStringValue(releaseHistory.Group),
+		FileName:           utils.NewStringValue(releaseHistory.FileName),
+		Content:            utils.NewStringValue(releaseHistory.Content),
+		Comment:            utils.NewStringValue(releaseHistory.Comment),
+		Format:             utils.NewStringValue(releaseHistory.Format),
+		Tags:               FromTagMap(releaseHistory.Metadata),
+		Md5:                utils.NewStringValue(releaseHistory.Md5),
+		Type:               utils.NewStringValue(releaseHistory.Type),
+		Status:             utils.NewStringValue(releaseHistory.Status),
+		CreateBy:           utils.NewStringValue(releaseHistory.CreateBy),
+		CreateTime:         utils.NewStringValue(commontime.Time2String(releaseHistory.CreateTime)),
+		ModifyBy:           utils.NewStringValue(releaseHistory.ModifyBy),
+		ModifyTime:         utils.NewStringValue(commontime.Time2String(releaseHistory.ModifyTime)),
+		ReleaseDescription: utils.NewStringValue(releaseHistory.ReleaseDescription),
+		Reason:             utils.NewStringValue(releaseHistory.Reason),
 	}
 }
 
@@ -424,7 +462,7 @@ func FromTagMap(kvs map[string]string) []*config_manage.ConfigFileTag {
 func ToTagMap(tags []*config_manage.ConfigFileTag) map[string]string {
 	kvs := map[string]string{}
 	for i := range tags {
-		kvs[tags[i].GetKey().GetValue()] = tags[i].GetKey().GetValue()
+		kvs[tags[i].GetKey().GetValue()] = tags[i].GetValue().GetValue()
 	}
 
 	return kvs

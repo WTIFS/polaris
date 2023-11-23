@@ -60,6 +60,7 @@ var (
 			"namespace":    "namespace",
 			"group":        "group",
 			"file_name":    "file_name",
+			"fileName":     "file_name",
 			"name":         "release_name",
 			"release_name": "release_name",
 			"offset":       "offset",
@@ -106,9 +107,9 @@ type Server struct {
 	storage           store.Store
 	fileCache         cachetypes.ConfigFileCache
 	groupCache        cachetypes.ConfigGroupCache
+	grayCache         cachetypes.GrayCache
 	caches            *cache.CacheManager
 	watchCenter       *watchCenter
-	connManager       *connManager
 	namespaceOperator namespace.NamespaceOperateServer
 	initialized       bool
 
@@ -134,6 +135,7 @@ func Initialize(ctx context.Context, config Config, s store.Store, cacheMgn *cac
 		return nil
 	}
 
+	cacheMgn.OpenResourceCache(configCacheEntries...)
 	err := originServer.initialize(ctx, config, s, namespaceOperator, cacheMgn)
 	if err != nil {
 		return err
@@ -146,9 +148,7 @@ func Initialize(ctx context.Context, config Config, s store.Store, cacheMgn *cac
 
 func (s *Server) initialize(ctx context.Context, config Config, ss store.Store,
 	namespaceOperator namespace.NamespaceOperateServer, cacheMgn *cache.CacheManager) error {
-
 	var err error
-
 	s.cfg = &config
 	if s.cfg.ContentMaxLength <= 0 {
 		s.cfg.ContentMaxLength = fileContentMaxLength
@@ -157,15 +157,12 @@ func (s *Server) initialize(ctx context.Context, config Config, ss store.Store,
 	s.namespaceOperator = namespaceOperator
 	s.fileCache = cacheMgn.ConfigFile()
 	s.groupCache = cacheMgn.ConfigGroup()
+	s.grayCache = cacheMgn.Gray()
 
-	s.watchCenter, err = NewWatchCenter()
+	s.watchCenter, err = NewWatchCenter(cacheMgn.ConfigFile())
 	if err != nil {
 		return err
 	}
-
-	// 初始化连接管理器
-	connMng := NewConfigConnManager(ctx, s.watchCenter)
-	s.connManager = connMng
 
 	// 获取History插件，注意：插件的配置在bootstrap已经设置好
 	s.history = plugin.GetHistory()
@@ -213,11 +210,6 @@ func (s *Server) WatchCenter() *watchCenter {
 // Cache 获取配置中心缓存模块
 func (s *Server) Cache() cachetypes.ConfigFileCache {
 	return s.fileCache
-}
-
-// ConnManager 获取配置中心连接管理器
-func (s *Server) ConnManager() *connManager {
-	return s.connManager
 }
 
 // CryptoManager 获取加密管理
