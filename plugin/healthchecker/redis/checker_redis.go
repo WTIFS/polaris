@@ -30,7 +30,6 @@ import (
 	"github.com/polarismesh/polaris/common/model"
 	"github.com/polarismesh/polaris/common/redispool"
 	commontime "github.com/polarismesh/polaris/common/time"
-	"github.com/polarismesh/polaris/common/utils"
 	"github.com/polarismesh/polaris/plugin"
 )
 
@@ -42,8 +41,6 @@ const (
 	PluginName = "heartbeatRedis"
 	// Sep separator to divide id and timestamp
 	Sep = ":"
-	// Servers key to manage hb servers
-	Servers = "servers"
 	// CountSep separator to divide server and count
 	CountSep = "|"
 	// defaultHeartbeatKeyTTL bounds orphaned heartbeat keys when the caller
@@ -84,16 +81,7 @@ func (r *RedisHealthChecker) Initialize(c *plugin.ConfigEntry) error {
 	r.hbPool.Start()
 	r.checkPool = redispool.NewRedisPool(ctx, &config, r.statis)
 	r.checkPool.Start()
-	if err = r.registerSelf(); err != nil {
-		return fmt.Errorf("fail to register %s to redis, err is %v", utils.LocalHost, err)
-	}
 	return nil
-}
-
-func (r *RedisHealthChecker) registerSelf() error {
-	localhost := utils.LocalHost
-	resp := r.checkPool.Sdd(Servers, []string{localhost})
-	return resp.Err
 }
 
 // Destroy plugin destroy

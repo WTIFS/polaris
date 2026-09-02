@@ -181,8 +181,8 @@ func (p *redisPool) MGet(keys []string) *Resp {
 	return p.handleTaskWithRetries(task)
 }
 
-// Sdd 使用连接池，向redis发起Sdd请求
-func (p *redisPool) Sdd(id string, members []string) *Resp {
+// Sadd uses the connection pool to issue an SADD request to Redis.
+func (p *redisPool) Sadd(id string, members []string) *Resp {
 	if err := p.checkRedisDead(); err != nil {
 		return &Resp{Err: err}
 	}

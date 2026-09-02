@@ -40,8 +40,8 @@ type RedisObject interface {
 type Pool interface {
 	// Start 启动ckv连接池工作
 	Start()
-	// Sdd 使用连接池，向redis发起Sdd请求
-	Sdd(id string, members []string) *Resp
+	// Sadd uses the connection pool to issue an SADD request to Redis.
+	Sadd(id string, members []string) *Resp
 	// Srem 使用连接池，向redis发起Srem请求
 	Srem(id string, members []string) *Resp
 	// Get 使用连接池，向redis发起Get请求

@@ -45,8 +45,8 @@ func (m *mockPool) Start() {
 	m.setExpires = make(map[string]time.Duration)
 }
 
-// Sdd 使用连接池，向redis发起Sdd请求
-func (m *mockPool) Sdd(id string, members []string) *redispool.Resp {
+// Sadd uses the connection pool to issue an SADD request to Redis.
+func (m *mockPool) Sadd(id string, members []string) *redispool.Resp {
 	values, ok := m.setValues[id]
 	if !ok {
 		values = make(map[string]bool)
