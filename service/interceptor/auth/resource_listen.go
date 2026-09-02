@@ -23,50 +23,57 @@ import (
 	apisecurity "github.com/polarismesh/specification/source/go/api/v1/security"
 
 	"github.com/polarismesh/polaris/common/model"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
 	"github.com/polarismesh/polaris/common/utils"
 	"github.com/polarismesh/polaris/service"
 )
 
 // Before this function is called before the resource operation
-func (svr *ServerAuthAbility) Before(ctx context.Context, resourceType model.Resource) {
+func (svr *Server) Before(ctx context.Context, resourceType model.Resource) {
 	// do nothing
 }
 
 // After this function is called after the resource operation
-func (svr *ServerAuthAbility) After(ctx context.Context, resourceType model.Resource, res *service.ResourceEvent) error {
-	switch resourceType {
-	case model.RService:
-		return svr.onServiceResource(ctx, res)
-	default:
-		return nil
-	}
+func (svr *Server) After(ctx context.Context, resourceType model.Resource, res *service.ResourceEvent) error {
+	// 资源删除，触发所有关联的策略进行一个 update 操作更新
+	return svr.onChangeResource(ctx, res)
 }
 
-// onServiceResource 服务资源的处理，只处理服务，namespace 只由 namespace 相关的进行处理，
-func (svr *ServerAuthAbility) onServiceResource(ctx context.Context, res *service.ResourceEvent) error {
-	authCtx := ctx.Value(utils.ContextAuthContextKey).(*model.AcquireContext)
-	ownerId := utils.ParseOwnerID(ctx)
+// onChangeResource 服务资源的处理，只处理服务，namespace 只由 namespace 相关的进行处理，
+func (svr *Server) onChangeResource(ctx context.Context, res *service.ResourceEvent) error {
+	authCtx := ctx.Value(utils.ContextAuthContextKey).(*authcommon.AcquireContext)
 
-	authCtx.SetAttachment(model.ResourceAttachmentKey, map[apisecurity.ResourceType][]model.ResourceEntry{
-		apisecurity.ResourceType_Services: {
-			{
-				ID:    res.Service.ID,
-				Owner: ownerId,
-			},
+	authCtx.SetAttachment(authcommon.ResourceAttachmentKey, map[apisecurity.ResourceType][]authcommon.ResourceEntry{
+		res.Resource.Type: {
+			res.Resource,
 		},
 	})
 
-	users := utils.ConvertStringValuesToSlice(res.ReqService.UserIds)
-	removeUses := utils.ConvertStringValuesToSlice(res.ReqService.RemoveUserIds)
+	var users, removeUsers []string
+	var groups, removeGroups []string
 
-	groups := utils.ConvertStringValuesToSlice(res.ReqService.GroupIds)
-	removeGroups := utils.ConvertStringValuesToSlice(res.ReqService.RemoveGroupIds)
+	for i := range res.AddPrincipals {
+		switch res.AddPrincipals[i].PrincipalType {
+		case authcommon.PrincipalUser:
+			users = append(users, res.AddPrincipals[i].PrincipalID)
+		case authcommon.PrincipalGroup:
+			groups = append(groups, res.AddPrincipals[i].PrincipalID)
+		}
+	}
+	for i := range res.DelPrincipals {
+		switch res.DelPrincipals[i].PrincipalType {
+		case authcommon.PrincipalUser:
+			removeUsers = append(removeUsers, res.DelPrincipals[i].PrincipalID)
+		case authcommon.PrincipalGroup:
+			removeGroups = append(removeGroups, res.DelPrincipals[i].PrincipalID)
+		}
+	}
 
-	authCtx.SetAttachment(model.LinkUsersKey, utils.StringSliceDeDuplication(users))
-	authCtx.SetAttachment(model.RemoveLinkUsersKey, utils.StringSliceDeDuplication(removeUses))
+	authCtx.SetAttachment(authcommon.LinkUsersKey, users)
+	authCtx.SetAttachment(authcommon.RemoveLinkUsersKey, removeUsers)
 
-	authCtx.SetAttachment(model.LinkGroupsKey, utils.StringSliceDeDuplication(groups))
-	authCtx.SetAttachment(model.RemoveLinkGroupsKey, utils.StringSliceDeDuplication(removeGroups))
+	authCtx.SetAttachment(authcommon.LinkGroupsKey, groups)
+	authCtx.SetAttachment(authcommon.RemoveLinkGroupsKey, removeGroups)
 
-	return svr.policyMgr.AfterResourceOperation(authCtx)
+	return svr.policySvr.AfterResourceOperation(authCtx)
 }

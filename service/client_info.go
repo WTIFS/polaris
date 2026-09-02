@@ -48,7 +48,7 @@ func (s *Server) checkAndStoreClient(ctx context.Context, req *apiservice.Client
 	if nil == client {
 		needStore = true
 	} else {
-		needStore = !clientEquals(client.Proto(), req)
+		needStore = !ClientEquals(client.Proto(), req)
 	}
 	if needStore {
 		client, resp = s.createClient(ctx, req)
@@ -80,12 +80,9 @@ func (s *Server) createClient(ctx context.Context, req *apiservice.Client) (*mod
 // req 原始请求
 // ins 包含了req数据与instanceID，serviceToken
 func (s *Server) asyncCreateClient(ctx context.Context, req *apiservice.Client) (*model.Client, *apiservice.Response) {
-	rid := utils.ParseRequestID(ctx)
-	pid := utils.ParsePlatformID(ctx)
 	future := s.bc.AsyncRegisterClient(req)
 	if err := future.Wait(); err != nil {
-		log.Error("[Server][ReportClient] async create client", zap.Error(err), utils.ZapRequestID(rid),
-			utils.ZapPlatformID(pid))
+		log.Error("[Server][ReportClient] async create client", zap.Error(err), utils.RequestID(ctx))
 		if future.Code() == apimodel.Code_ExistedResource {
 			req.Id = utils.NewStringValue(req.GetId().GetValue())
 		}
@@ -155,7 +152,7 @@ func client2Api(client *model.Client) *apiservice.Client {
 	return out
 }
 
-func clientEquals(client1 *apiservice.Client, client2 *apiservice.Client) bool {
+func ClientEquals(client1 *apiservice.Client, client2 *apiservice.Client) bool {
 	if client1.GetId().GetValue() != client2.GetId().GetValue() {
 		return false
 	}

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	apisecurity "github.com/polarismesh/specification/source/go/api/v1/security"
 	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
 	"go.uber.org/zap"
 
@@ -31,12 +32,22 @@ import (
 	connlimit "github.com/polarismesh/polaris/common/conn/limit"
 	commonlog "github.com/polarismesh/polaris/common/log"
 	"github.com/polarismesh/polaris/common/model"
+	"github.com/polarismesh/polaris/common/model/admin"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
 	commonstore "github.com/polarismesh/polaris/common/store"
 	"github.com/polarismesh/polaris/common/utils"
 	"github.com/polarismesh/polaris/plugin"
 )
 
-func (s *Server) GetServerConnections(_ context.Context, req *ConnReq) (*ConnCountResp, error) {
+func (s *Server) HasMainUser(ctx context.Context, user apisecurity.User) (bool, error) {
+	return false, nil
+}
+
+func (s *Server) InitMainUser(ctx context.Context, user apisecurity.User) error {
+	return nil
+}
+
+func (s *Server) GetServerConnections(_ context.Context, req *admin.ConnReq) (*admin.ConnCountResp, error) {
 	if req.Protocol == "" {
 		return nil, errors.New("missing param protocol")
 	}
@@ -46,7 +57,7 @@ func (s *Server) GetServerConnections(_ context.Context, req *ConnReq) (*ConnCou
 		return nil, errors.New("not found the protocol")
 	}
 
-	var resp = ConnCountResp{
+	var resp = admin.ConnCountResp{
 		Protocol: req.Protocol,
 		Total:    lis.GetListenerConnCount(),
 		Host:     map[string]int32{},
@@ -63,7 +74,7 @@ func (s *Server) GetServerConnections(_ context.Context, req *ConnReq) (*ConnCou
 	return &resp, nil
 }
 
-func (s *Server) GetServerConnStats(_ context.Context, req *ConnReq) (*ConnStatsResp, error) {
+func (s *Server) GetServerConnStats(_ context.Context, req *admin.ConnReq) (*admin.ConnStatsResp, error) {
 	if req.Protocol == "" {
 		return nil, errors.New("missing param protocol")
 	}
@@ -73,7 +84,7 @@ func (s *Server) GetServerConnStats(_ context.Context, req *ConnReq) (*ConnStats
 		return nil, errors.New("not found the protocol")
 	}
 
-	var resp ConnStatsResp
+	var resp admin.ConnStatsResp
 
 	resp.Protocol = req.Protocol
 	resp.ActiveConnTotal = lis.GetListenerConnCount()
@@ -100,7 +111,7 @@ func (s *Server) GetServerConnStats(_ context.Context, req *ConnReq) (*ConnStats
 	return &resp, nil
 }
 
-func (s *Server) CloseConnections(_ context.Context, reqs []ConnReq) error {
+func (s *Server) CloseConnections(_ context.Context, reqs []admin.ConnReq) error {
 	for _, entry := range reqs {
 		listener := connlimit.GetLimitListener(entry.Protocol)
 		if listener == nil {
@@ -156,11 +167,11 @@ func (s *Server) CleanInstance(ctx context.Context, req *apiservice.Instance) *a
 	}
 	if err := s.storage.CleanInstance(instanceID); err != nil {
 		log.Error("Clean instance",
-			zap.String("err", err.Error()), utils.ZapRequestID(utils.ParseRequestID(ctx)))
+			zap.String("err", err.Error()), utils.RequestID(ctx))
 		return api.NewInstanceResponse(commonstore.StoreCode2APICode(err), req)
 	}
 
-	log.Info("Clean instance", utils.ZapRequestID(utils.ParseRequestID(ctx)), utils.ZapInstanceID(instanceID))
+	log.Info("Clean instance", utils.RequestID(ctx), utils.ZapInstanceID(instanceID))
 	return api.NewInstanceResponse(apimodel.Code_ExecuteSuccess, req)
 }
 
@@ -172,11 +183,11 @@ func (s *Server) GetLastHeartbeat(_ context.Context, req *apiservice.Instance) *
 	return s.healthCheckServer.GetLastHeartbeat(req)
 }
 
-func (s *Server) GetLogOutputLevel(_ context.Context) ([]ScopeLevel, error) {
+func (s *Server) GetLogOutputLevel(_ context.Context) ([]admin.ScopeLevel, error) {
 	scopes := commonlog.Scopes()
-	out := make([]ScopeLevel, 0, len(scopes))
+	out := make([]admin.ScopeLevel, 0, len(scopes))
 	for k := range scopes {
-		out = append(out, ScopeLevel{
+		out = append(out, admin.ScopeLevel{
 			Name:  k,
 			Level: scopes[k].GetOutputLevel().Name(),
 		})
@@ -189,13 +200,12 @@ func (s *Server) SetLogOutputLevel(_ context.Context, scope string, level string
 	return commonlog.SetLogOutputLevel(scope, level)
 }
 
-func (s *Server) ListLeaderElections(_ context.Context) ([]*model.LeaderElection, error) {
+func (s *Server) ListLeaderElections(_ context.Context) ([]*admin.LeaderElection, error) {
 	return s.storage.ListLeaderElections()
 }
 
 func (s *Server) ReleaseLeaderElection(_ context.Context, electKey string) error {
 	return s.storage.ReleaseLeaderElection(electKey)
-
 }
 
 func (svr *Server) GetCMDBInfo(ctx context.Context) ([]model.LocationView, error) {
@@ -219,4 +229,9 @@ func (svr *Server) GetCMDBInfo(ctx context.Context) ([]model.LocationView, error
 	})
 
 	return ret, nil
+}
+
+// GetServerFunctions 获取服务端支持的功能列表
+func (svr *Server) GetServerFunctions(ctx context.Context) []authcommon.ServerFunctionGroup {
+	return authcommon.ServerFunctions
 }

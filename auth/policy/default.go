@@ -23,12 +23,13 @@ import (
 
 	"github.com/polarismesh/polaris/auth"
 	policy_auth "github.com/polarismesh/polaris/auth/policy/inteceptor/auth"
+	"github.com/polarismesh/polaris/auth/policy/inteceptor/paramcheck"
 )
 
 type ServerProxyFactory func(svr *Server, pre auth.StrategyServer) (auth.StrategyServer, error)
 
 var (
-	// serverProxyFactories auth.UserServer API 代理工厂
+	// serverProxyFactories auth.StrategyServer API 代理工厂
 	serverProxyFactories = map[string]ServerProxyFactory{}
 )
 
@@ -53,6 +54,9 @@ func loadInteceptors() {
 	RegisterServerProxy("auth", func(svr *Server, pre auth.StrategyServer) (auth.StrategyServer, error) {
 		return policy_auth.NewServer(pre), nil
 	})
+	RegisterServerProxy("paramcheck", func(svr *Server, pre auth.StrategyServer) (auth.StrategyServer, error) {
+		return paramcheck.NewServer(pre), nil
+	})
 }
 
 func BuildServer() (*Server, auth.StrategyServer, error) {
@@ -61,7 +65,7 @@ func BuildServer() (*Server, auth.StrategyServer, error) {
 	var nextSvr auth.StrategyServer
 	nextSvr = svr
 	// 需要返回包装代理的 DiscoverServer
-	order := []string{"auth"}
+	order := GetChainOrder()
 	for i := range order {
 		factory, exist := serverProxyFactories[order[i]]
 		if !exist {
@@ -75,4 +79,11 @@ func BuildServer() (*Server, auth.StrategyServer, error) {
 		nextSvr = proxySvr
 	}
 	return svr, nextSvr, nil
+}
+
+func GetChainOrder() []string {
+	return []string{
+		"auth",
+		"paramcheck",
+	}
 }

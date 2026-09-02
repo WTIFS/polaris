@@ -37,6 +37,10 @@ const (
 	UpdateCacheInterval = 1 * time.Second
 )
 
+var (
+	ReportInterval = 1 * time.Second
+)
+
 // CacheManager 名字服务缓存
 type CacheManager struct {
 	storage  store.Store
@@ -165,6 +169,11 @@ func (nc *CacheManager) GetUpdateCacheInterval() time.Duration {
 	return UpdateCacheInterval
 }
 
+// GetReportInterval 获取当前cache的更新间隔
+func (nc *CacheManager) GetReportInterval() time.Duration {
+	return ReportInterval
+}
+
 // Service 获取Service缓存信息
 func (nc *CacheManager) Service() types.ServiceCache {
 	return nc.caches[types.CacheService].(types.ServiceCache)
@@ -243,6 +252,11 @@ func (nc *CacheManager) ConfigGroup() types.ConfigGroupCache {
 // Gray get Gray cache information
 func (nc *CacheManager) Gray() types.GrayCache {
 	return nc.caches[types.CacheGray].(types.GrayCache)
+}
+
+// Role get Role cache information
+func (nc *CacheManager) Role() types.RoleCache {
+	return nc.caches[types.CacheRole].(types.RoleCache)
 }
 
 // GetCacher get types.Cache impl

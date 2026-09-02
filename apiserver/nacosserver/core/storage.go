@@ -29,7 +29,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	nacosmodel "github.com/polarismesh/polaris/apiserver/nacosserver/model"
-	"github.com/polarismesh/polaris/cache"
+	cachetypes "github.com/polarismesh/polaris/cache/api"
 	"github.com/polarismesh/polaris/common/eventhub"
 	"github.com/polarismesh/polaris/common/model"
 	commontime "github.com/polarismesh/polaris/common/time"
@@ -50,7 +50,7 @@ type (
 		ins []*nacosmodel.Instance, healthyCount int32) *nacosmodel.ServiceInfo
 )
 
-func NewNacosDataStorage(cacheMgr *cache.CacheManager) *NacosDataStorage {
+func NewNacosDataStorage(cacheMgr cachetypes.CacheManager) *NacosDataStorage {
 	ctx, cancel := context.WithCancel(context.Background())
 	notifier, notifierFinish := context.WithCancel(context.Background())
 	store := &NacosDataStorage{
@@ -67,7 +67,7 @@ func NewNacosDataStorage(cacheMgr *cache.CacheManager) *NacosDataStorage {
 
 // NacosDataStorage .
 type NacosDataStorage struct {
-	cacheMgr *cache.CacheManager
+	cacheMgr cachetypes.CacheManager
 	ctx      context.Context
 	cancel   context.CancelFunc
 
@@ -82,7 +82,7 @@ type NacosDataStorage struct {
 	revisions  map[string]string
 }
 
-func (n *NacosDataStorage) Cache() *cache.CacheManager {
+func (n *NacosDataStorage) Cache() cachetypes.CacheManager {
 	return n.cacheMgr
 }
 
@@ -197,7 +197,7 @@ func (n *NacosDataStorage) syncTask() {
 
 	// 计算需要 refresh 的服务信息列表
 	for _, ns := range nsList {
-		_, svcs := n.cacheMgr.Service().ListServices(ns.Name)
+		_, svcs := n.cacheMgr.Service().ListServices(context.Background(), ns.Name)
 		for _, svc := range svcs {
 			revision := n.cacheMgr.Service().GetRevisionWorker().GetServiceInstanceRevision(svc.ID)
 			oldRevision, ok := n.revisions[svc.ID]
@@ -343,7 +343,7 @@ func SelectInstancesWithHealthyProtection(ctx *FilterContext, result *nacosmodel
 	return result
 }
 
-func ToNacosService(cacheMgr *cache.CacheManager, namespace, service, group string) *nacosmodel.ServiceMetadata {
+func ToNacosService(cacheMgr cachetypes.CacheManager, namespace, service, group string) *nacosmodel.ServiceMetadata {
 	ret := &nacosmodel.ServiceMetadata{
 		ServiceKey: nacosmodel.ServiceKey{
 			Namespace: namespace,

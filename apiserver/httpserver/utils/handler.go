@@ -71,52 +71,18 @@ func (h *Handler) ParseArrayByText(createMessage func() proto.Message, text stri
 func (h *Handler) parseArray(createMessage func() proto.Message, jsonDecoder *json.Decoder) (context.Context, error) {
 	requestID := h.Request.HeaderParameter("Request-Id")
 	// read open bracket
-	_, err := jsonDecoder.Token()
-	if err != nil {
+	if _, err := jsonDecoder.Token(); err != nil {
 		accesslog.Error(err.Error(), utils.ZapRequestID(requestID))
 		return nil, err
 	}
 	for jsonDecoder.More() {
 		protoMessage := createMessage()
-		err := UnmarshalNext(jsonDecoder, protoMessage)
-		if err != nil {
+		if err := UnmarshalNext(jsonDecoder, protoMessage); err != nil {
 			accesslog.Error(err.Error(), utils.ZapRequestID(requestID))
 			return nil, err
 		}
 	}
-	return h.postParseMessage(requestID)
-}
-
-func (h *Handler) postParseMessage(requestID string) (context.Context, error) {
-	platformID := h.Request.HeaderParameter("Platform-Id")
-	platformToken := h.Request.HeaderParameter("Platform-Token")
-	token := h.Request.HeaderParameter("Polaris-Token")
-	authToken := h.Request.HeaderParameter(utils.HeaderAuthTokenKey)
-	ctx := context.Background()
-	ctx = context.WithValue(ctx, utils.StringContext("request-id"), requestID)
-	ctx = context.WithValue(ctx, utils.StringContext("platform-id"), platformID)
-	ctx = context.WithValue(ctx, utils.StringContext("platform-token"), platformToken)
-	if token != "" {
-		ctx = context.WithValue(ctx, utils.StringContext("polaris-token"), token)
-	}
-	if authToken != "" {
-		ctx = context.WithValue(ctx, utils.ContextAuthTokenKey, authToken)
-	}
-
-	var operator string
-	addrSlice := strings.Split(h.Request.Request.RemoteAddr, ":")
-	if len(addrSlice) == 2 {
-		operator = "HTTP:" + addrSlice[0]
-		if platformID != "" {
-			operator += "(" + platformID + ")"
-		}
-	}
-	if staffName := h.Request.HeaderParameter("Staffname"); staffName != "" {
-		operator = staffName
-	}
-	ctx = context.WithValue(ctx, utils.StringContext("operator"), operator)
-
-	return ctx, nil
+	return h.ParseHeaderContext(), nil
 }
 
 // Parse 解析请求
@@ -126,7 +92,7 @@ func (h *Handler) Parse(message proto.Message) (context.Context, error) {
 		accesslog.Error(err.Error(), utils.ZapRequestID(requestID))
 		return nil, err
 	}
-	return h.postParseMessage(requestID)
+	return h.ParseHeaderContext(), nil
 }
 
 // ParseHeaderContext 将http请求header中携带的用户信息提取出来
@@ -141,6 +107,7 @@ func (h *Handler) ParseHeaderContext() context.Context {
 	ctx = context.WithValue(ctx, utils.StringContext("request-id"), requestID)
 	ctx = context.WithValue(ctx, utils.StringContext("platform-id"), platformID)
 	ctx = context.WithValue(ctx, utils.StringContext("platform-token"), platformToken)
+	ctx = context.WithValue(ctx, utils.ContextRequestHeaders, h.Request.Request.Header)
 	ctx = context.WithValue(ctx, utils.ContextClientAddress, h.Request.Request.RemoteAddr)
 	if token != "" {
 		ctx = context.WithValue(ctx, utils.StringContext("polaris-token"), token)
@@ -317,7 +284,7 @@ func (h *Handler) WriteHeaderAndProto(obj api.ResponseMessage) {
 	status := api.CalcCode(obj)
 
 	if status != http.StatusOK {
-		accesslog.Error(obj.String(), utils.ZapRequestID(requestID))
+		accesslog.Error(h.Request.Request.RequestURI+" "+obj.String(), utils.ZapRequestID(requestID))
 	}
 	if code := obj.GetCode().GetValue(); code != api.ExecuteSuccess {
 		h.Response.AddHeader(utils.PolarisCode, fmt.Sprintf("%d", code))
@@ -348,9 +315,8 @@ func (h *Handler) WriteHeaderAndProtoV2(obj api.ResponseMessageV2) {
 	h.Response.AddHeader(utils.PolarisRequestID, requestID)
 	h.Response.WriteHeader(status)
 
-	m := jsonpb.Marshaler{Indent: " ", EmitDefaults: true}
-	err := m.Marshal(h.Response, obj)
-	if err != nil {
+	m := newJsonpbMarshaler()
+	if err := m.Marshal(h.Response, obj); err != nil {
 		accesslog.Error(err.Error(), utils.ZapRequestID(requestID))
 	}
 }
@@ -411,14 +377,18 @@ func ParseJsonBody(req *restful.Request, value interface{}) error {
 	return nil
 }
 
+func newJsonpbMarshaler() jsonpb.Marshaler {
+	return jsonpb.Marshaler{Indent: " ", EmitDefaults: true}
+}
+
 func (h *Handler) handleResponse(obj api.ResponseMessage) error {
 	if !enableProtoCache {
-		m := jsonpb.Marshaler{Indent: " ", EmitDefaults: true}
+		m := newJsonpbMarshaler()
 		return m.Marshal(h.Response, obj)
 	}
 	cacheVal := convert(obj)
 	if cacheVal == nil {
-		m := jsonpb.Marshaler{Indent: " ", EmitDefaults: true}
+		m := newJsonpbMarshaler()
 		return m.Marshal(h.Response, obj)
 	}
 	if saveVal := protoCache.Get(cacheVal.CacheType, cacheVal.Key); saveVal != nil {
@@ -432,7 +402,7 @@ func (h *Handler) handleResponse(obj api.ResponseMessage) error {
 	if err := cacheVal.Marshal(obj); err != nil {
 		accesslog.Warn("[Api-http][ProtoCache] prepare message fail, direct send msg", zap.String("key", cacheVal.Key),
 			zap.Error(err))
-		m := jsonpb.Marshaler{Indent: " ", EmitDefaults: true}
+		m := newJsonpbMarshaler()
 		return m.Marshal(h.Response, obj)
 	}
 
@@ -440,7 +410,7 @@ func (h *Handler) handleResponse(obj api.ResponseMessage) error {
 	if !ok || cacheVal == nil {
 		accesslog.Warn("[Api-http][ProtoCache] put cache ignore", zap.String("key", cacheVal.Key),
 			zap.String("cacheType", cacheVal.CacheType))
-		m := jsonpb.Marshaler{Indent: " ", EmitDefaults: true}
+		m := newJsonpbMarshaler()
 		return m.Marshal(h.Response, obj)
 	}
 	if len(cacheVal.GetBuf()) > 0 {

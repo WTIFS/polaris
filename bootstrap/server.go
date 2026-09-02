@@ -42,6 +42,7 @@ import (
 	"github.com/polarismesh/polaris/common/log"
 	"github.com/polarismesh/polaris/common/metrics"
 	"github.com/polarismesh/polaris/common/model"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
 	"github.com/polarismesh/polaris/common/utils"
 	"github.com/polarismesh/polaris/common/version"
 	config_center "github.com/polarismesh/polaris/config"
@@ -75,7 +76,7 @@ func Start(configFilePath string) {
 		fmt.Printf("[ERROR] config yaml marshal fail\n")
 		return
 	}
-	fmt.Printf(string(c))
+	_, _ = fmt.Println(string(c))
 
 	// 初始化日志打印
 	err = log.Configure(cfg.Bootstrap.Logger)
@@ -347,19 +348,7 @@ func RestartServers(errCh chan error) error {
 		return err
 	}
 	log.Infof("new config: %+v", cfg)
-
-	// 把配置的每个apiserver，进行重启
-	for _, protocol := range cfg.APIServers {
-		server, exist := apiserver.Slots[protocol.Name]
-		if !exist {
-			log.Errorf("api server slot %s not exists\n", protocol.Name)
-			return err
-		}
-		log.Infof("begin restarting server: %s", protocol.Name)
-		if err := server.Restart(protocol.Option, protocol.API, errCh); err != nil {
-			return err
-		}
-	}
+	// TODO: 配置的动态加载后续统一设计
 	return nil
 }
 
@@ -451,8 +440,11 @@ func genContext() context.Context {
 	ctx := context.Background()
 	reqCtx := context.WithValue(context.Background(), utils.ContextAuthTokenKey, "")
 	ctx = context.WithValue(ctx, utils.StringContext("request-id"), fmt.Sprintf("self-%d", time.Now().Nanosecond()))
-	ctx = context.WithValue(ctx, utils.ContextAuthContextKey, model.NewAcquireContext(
-		model.WithOperation(model.Read), model.WithModule(model.BootstrapModule), model.WithRequestContext(reqCtx)))
+	ctx = context.WithValue(ctx, utils.ContextAuthContextKey,
+		authcommon.NewAcquireContext(
+			authcommon.WithOperation(authcommon.Read),
+			authcommon.WithModule(authcommon.BootstrapModule),
+			authcommon.WithRequestContext(reqCtx)))
 	return ctx
 }
 
@@ -569,7 +561,7 @@ func polarisServiceRegister(polarisService *boot_config.PolarisService, apiServe
 // selfRegister 服务自注册
 func selfRegister(
 	host string, port uint32, protocol string, isolated bool, polarisService *boot_config.Service, hbInterval int) error {
-	server, err := service.GetOriginServer()
+	server, err := service.GetServer()
 	if err != nil {
 		return err
 	}
@@ -609,7 +601,7 @@ func selfRegister(
 		Metadata: metadata,
 	}
 
-	resp := server.CreateInstance(genContext(), req)
+	resp := server.RegisterInstance(genContext(), req)
 	if api.CalcCode(resp) != 200 {
 		// 如果self之前注册过，那么可以忽略
 		if resp.GetCode().GetValue() != api.ExistedResource {

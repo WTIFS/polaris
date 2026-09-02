@@ -18,6 +18,7 @@
 package service
 
 import (
+	"context"
 	"sort"
 	"strings"
 
@@ -40,7 +41,7 @@ func (sc *serviceCache) forceUpdate() error {
 }
 
 // GetServicesByFilter 通过filter在缓存中进行服务过滤
-func (sc *serviceCache) GetServicesByFilter(serviceFilters *types.ServiceArgs,
+func (sc *serviceCache) GetServicesByFilter(ctx context.Context, serviceFilters *types.ServiceArgs,
 	instanceFilters *store.InstanceArgs, offset, limit uint32) (uint32, []*model.EnhancedService, error) {
 
 	if err := sc.forceUpdate(); err != nil {
@@ -72,6 +73,23 @@ func (sc *serviceCache) GetServicesByFilter(serviceFilters *types.ServiceArgs,
 		}
 		matchServices = tmpSvcs
 	}
+
+	// 这里需要额外做过滤判断
+	predicates := types.LoadServicePredicates(ctx)
+	ret := make([]*model.Service, 0, len(matchServices))
+	for i := range matchServices {
+		pass := true
+		for pi := range predicates {
+			if !predicates[pi](ctx, matchServices[i]) {
+				pass = false
+				break
+			}
+		}
+		if pass {
+			ret = append(ret, matchServices[i])
+		}
+	}
+	matchServices = ret
 
 	amount, services := sortBeforeTrim(matchServices, offset, limit)
 

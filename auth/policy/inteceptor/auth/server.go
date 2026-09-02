@@ -20,28 +20,24 @@ package auth
 import (
 	"context"
 
-	apimodel "github.com/polarismesh/specification/source/go/api/v1/model"
+	"github.com/golang/protobuf/ptypes/wrappers"
 	apisecurity "github.com/polarismesh/specification/source/go/api/v1/security"
 	apiservice "github.com/polarismesh/specification/source/go/api/v1/service_manage"
-	"go.uber.org/zap"
 
 	"github.com/polarismesh/polaris/auth"
 	cachetypes "github.com/polarismesh/polaris/cache/api"
 	api "github.com/polarismesh/polaris/common/api/v1"
 	"github.com/polarismesh/polaris/common/model"
+	authcommon "github.com/polarismesh/polaris/common/model/auth"
 	"github.com/polarismesh/polaris/common/utils"
 	"github.com/polarismesh/polaris/store"
 )
 
-var (
-	// MustOwner 必须超级账户 or 主账户
-	MustOwner = true
-	// NotOwner 任意账户
-	NotOwner = false
-	// WriteOp 写操作
-	WriteOp = true
-	// ReadOp 读操作
-	ReadOp = false
+type (
+	PolicyInfoGetter interface {
+		GetId() *wrappers.StringValue
+		GetName() *wrappers.StringValue
+	}
 )
 
 func NewServer(nextSvr auth.StrategyServer) auth.StrategyServer {
@@ -53,6 +49,11 @@ func NewServer(nextSvr auth.StrategyServer) auth.StrategyServer {
 type Server struct {
 	nextSvr auth.StrategyServer
 	userSvr auth.UserServer
+}
+
+// PolicyHelper implements auth.StrategyServer.
+func (svr *Server) PolicyHelper() auth.PolicyHelper {
+	return svr.nextSvr.PolicyHelper()
 }
 
 // Initialize 执行初始化动作
@@ -68,62 +69,166 @@ func (svr *Server) Name() string {
 
 // CreateStrategy 创建策略
 func (svr *Server) CreateStrategy(ctx context.Context, strategy *apisecurity.AuthStrategy) *apiservice.Response {
-	ctx, rsp := svr.verifyAuth(ctx, WriteOp, MustOwner)
-	if rsp != nil {
-		return rsp
+	authCtx := authcommon.NewAcquireContext(
+		authcommon.WithRequestContext(ctx),
+		authcommon.WithOperation(authcommon.Create),
+		authcommon.WithModule(authcommon.AuthModule),
+		authcommon.WithMethod(authcommon.CreateAuthPolicy),
+	)
+
+	if _, err := svr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
+		resp := api.NewResponseWithMsg(authcommon.ConvertToErrCode(err), err.Error())
+		return resp
 	}
-	return svr.nextSvr.CreateStrategy(ctx, strategy)
+	return svr.nextSvr.CreateStrategy(authCtx.GetRequestContext(), strategy)
 }
 
 // UpdateStrategies 批量更新策略
 func (svr *Server) UpdateStrategies(ctx context.Context, reqs []*apisecurity.ModifyAuthStrategy) *apiservice.BatchWriteResponse {
-	ctx, rsp := svr.verifyAuth(ctx, WriteOp, MustOwner)
-	if rsp != nil {
-		resp := api.NewAuthBatchWriteResponse(apimodel.Code_ExecuteSuccess)
-		api.Collect(resp, rsp)
+	resources := make([]authcommon.ResourceEntry, 0, len(reqs))
+	for i := range reqs {
+		entry := authcommon.ResourceEntry{
+			Type: apisecurity.ResourceType_PolicyRules,
+			ID:   reqs[i].GetId().GetValue(),
+		}
+		if saveRule := svr.nextSvr.PolicyHelper().GetPolicyRule(reqs[i].GetId().GetValue()); saveRule != nil {
+			entry.Metadata = saveRule.Metadata
+		}
+		resources = append(resources, entry)
+	}
+
+	authCtx := authcommon.NewAcquireContext(
+		authcommon.WithRequestContext(ctx),
+		authcommon.WithOperation(authcommon.Modify),
+		authcommon.WithModule(authcommon.AuthModule),
+		authcommon.WithMethod(authcommon.UpdateAuthPolicies),
+		authcommon.WithAccessResources(map[apisecurity.ResourceType][]authcommon.ResourceEntry{
+			apisecurity.ResourceType_PolicyRules: resources,
+		}),
+	)
+
+	if _, err := svr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
+		resp := api.NewBatchWriteResponseWithMsg(authcommon.ConvertToErrCode(err), err.Error())
 		return resp
 	}
-	return svr.nextSvr.UpdateStrategies(ctx, reqs)
+	return svr.nextSvr.UpdateStrategies(authCtx.GetRequestContext(), reqs)
 }
 
 // DeleteStrategies 删除策略
 func (svr *Server) DeleteStrategies(ctx context.Context, reqs []*apisecurity.AuthStrategy) *apiservice.BatchWriteResponse {
-	ctx, rsp := svr.verifyAuth(ctx, WriteOp, MustOwner)
-	if rsp != nil {
-		resp := api.NewAuthBatchWriteResponse(apimodel.Code_ExecuteSuccess)
-		api.Collect(resp, rsp)
+	resources := make([]authcommon.ResourceEntry, 0, len(reqs))
+	for i := range reqs {
+		entry := authcommon.ResourceEntry{
+			Type: apisecurity.ResourceType_PolicyRules,
+			ID:   reqs[i].GetId().GetValue(),
+		}
+		if saveRule := svr.nextSvr.PolicyHelper().GetPolicyRule(reqs[i].GetId().GetValue()); saveRule != nil {
+			entry.Metadata = saveRule.Metadata
+		}
+		resources = append(resources, entry)
+	}
+
+	authCtx := authcommon.NewAcquireContext(
+		authcommon.WithRequestContext(ctx),
+		authcommon.WithOperation(authcommon.Delete),
+		authcommon.WithModule(authcommon.AuthModule),
+		authcommon.WithMethod(authcommon.DeleteAuthPolicies),
+		authcommon.WithAccessResources(map[apisecurity.ResourceType][]authcommon.ResourceEntry{
+			apisecurity.ResourceType_PolicyRules: resources,
+		}),
+	)
+
+	if _, err := svr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
+		resp := api.NewBatchWriteResponseWithMsg(authcommon.ConvertToErrCode(err), err.Error())
 		return resp
 	}
-	return svr.nextSvr.DeleteStrategies(ctx, reqs)
+	return svr.nextSvr.DeleteStrategies(authCtx.GetRequestContext(), reqs)
 }
 
 // GetStrategies 获取资源列表
 // support 1. 支持按照 principal-id + principal-role 进行查询
 // support 2. 支持普通的鉴权策略查询
 func (svr *Server) GetStrategies(ctx context.Context, query map[string]string) *apiservice.BatchQueryResponse {
-	ctx, rsp := svr.verifyAuth(ctx, ReadOp, NotOwner)
-	if rsp != nil {
-		return api.NewAuthBatchQueryResponseWithMsg(apimodel.Code(rsp.GetCode().Value), rsp.Info.Value)
+	authCtx := authcommon.NewAcquireContext(
+		authcommon.WithRequestContext(ctx),
+		authcommon.WithOperation(authcommon.Read),
+		authcommon.WithModule(authcommon.AuthModule),
+		authcommon.WithMethod(authcommon.DescribeAuthPolicies),
+	)
+
+	checker := svr.GetAuthChecker()
+	if _, err := checker.CheckConsolePermission(authCtx); err != nil {
+		return api.NewAuthBatchQueryResponseWithMsg(authcommon.ConvertToErrCode(err), err.Error())
 	}
+
+	ctx = authCtx.GetRequestContext()
+	ctx = cachetypes.AppendAuthPolicyPredicate(ctx, func(ctx context.Context, sd *authcommon.StrategyDetail) bool {
+		ok := checker.ResourcePredicate(authCtx, &authcommon.ResourceEntry{
+			Type:     apisecurity.ResourceType_PolicyRules,
+			ID:       sd.ID,
+			Metadata: sd.Metadata,
+		})
+		if ok {
+			return true
+		}
+		// 兼容老版本的策略查询逻辑
+		if compatible, _ := ctx.Value(model.ContextKeyCompatible{}).(bool); compatible {
+			for i := range sd.Principals {
+				if sd.Principals[i].PrincipalID == utils.ParseUserID(ctx) {
+					return true
+				}
+			}
+		}
+		return false
+	})
+
+	authCtx.SetRequestContext(ctx)
 	return svr.nextSvr.GetStrategies(ctx, query)
 }
 
 // GetStrategy 获取策略详细
 func (svr *Server) GetStrategy(ctx context.Context, strategy *apisecurity.AuthStrategy) *apiservice.Response {
-	ctx, rsp := svr.verifyAuth(ctx, ReadOp, NotOwner)
-	if rsp != nil {
-		return rsp
+	entry := authcommon.ResourceEntry{
+		Type: apisecurity.ResourceType_PolicyRules,
+		ID:   strategy.GetId().GetValue(),
 	}
-	return svr.nextSvr.GetStrategy(ctx, strategy)
+	saveRule := svr.nextSvr.PolicyHelper().GetPolicyRule(strategy.GetId().GetValue())
+	if saveRule != nil {
+		entry.Metadata = saveRule.Metadata
+	}
+
+	authCtx := authcommon.NewAcquireContext(
+		authcommon.WithRequestContext(ctx),
+		authcommon.WithOperation(authcommon.Read),
+		authcommon.WithModule(authcommon.AuthModule),
+		authcommon.WithMethod(authcommon.DescribeAuthPolicyDetail),
+		authcommon.WithAccessResources(map[apisecurity.ResourceType][]authcommon.ResourceEntry{
+			apisecurity.ResourceType_PolicyRules: {entry},
+		}),
+	)
+
+	checker := svr.GetAuthChecker()
+	if _, err := checker.CheckConsolePermission(authCtx); err != nil {
+		return api.NewResponseWithMsg(authcommon.ConvertToErrCode(err), err.Error())
+	}
+	return svr.nextSvr.GetStrategy(authCtx.GetRequestContext(), strategy)
 }
 
 // GetPrincipalResources 获取某个 principal 的所有可操作资源列表
 func (svr *Server) GetPrincipalResources(ctx context.Context, query map[string]string) *apiservice.Response {
-	ctx, rsp := svr.verifyAuth(ctx, ReadOp, NotOwner)
-	if rsp != nil {
-		return rsp
+	authCtx := authcommon.NewAcquireContext(
+		authcommon.WithRequestContext(ctx),
+		authcommon.WithOperation(authcommon.Read),
+		authcommon.WithModule(authcommon.AuthModule),
+		authcommon.WithMethod(authcommon.DescribePrincipalResources),
+	)
+
+	checker := svr.GetAuthChecker()
+
+	if _, err := checker.CheckConsolePermission(authCtx); err != nil {
+		return api.NewResponseWithMsg(authcommon.ConvertToErrCode(err), err.Error())
 	}
-	return svr.nextSvr.GetPrincipalResources(ctx, query)
+	return svr.nextSvr.GetPrincipalResources(authCtx.GetRequestContext(), query)
 }
 
 // GetAuthChecker 获取鉴权检查器
@@ -132,57 +237,109 @@ func (svr *Server) GetAuthChecker() auth.AuthChecker {
 }
 
 // AfterResourceOperation 操作完资源的后置处理逻辑
-func (svr *Server) AfterResourceOperation(afterCtx *model.AcquireContext) error {
+func (svr *Server) AfterResourceOperation(afterCtx *authcommon.AcquireContext) error {
 	return svr.nextSvr.AfterResourceOperation(afterCtx)
 }
 
-// verifyAuth 用于 user、group 以及 strategy 模块的鉴权工作检查
-func (svr *Server) verifyAuth(ctx context.Context, isWrite bool,
-	needOwner bool) (context.Context, *apiservice.Response) {
-	reqId := utils.ParseRequestID(ctx)
-	authToken := utils.ParseAuthToken(ctx)
-
-	if authToken == "" {
-		log.Error("[Auth][Server] auth token is empty", utils.ZapRequestID(reqId))
-		return nil, api.NewAuthResponse(apimodel.Code_EmptyAutToken)
-	}
-
-	authCtx := model.NewAcquireContext(
-		model.WithRequestContext(ctx),
-		model.WithModule(model.AuthModule),
+// CreateRoles 批量创建角色
+func (svr *Server) CreateRoles(ctx context.Context, reqs []*apisecurity.Role) *apiservice.BatchWriteResponse {
+	authCtx := authcommon.NewAcquireContext(
+		authcommon.WithRequestContext(ctx),
+		authcommon.WithOperation(authcommon.Create),
+		authcommon.WithModule(authcommon.AuthModule),
+		authcommon.WithMethod(authcommon.CreateAuthRoles),
 	)
 
-	// case 1. 如果 error 不是 token 被禁止的 error，直接返回
-	// case 2. 如果 error 是 token 被禁止，按下面情况判断
-	// 		i. 如果当前只是一个数据的读取操作，则放通
-	// 		ii. 如果当前是一个数据的写操作，则只能允许处于正常的 token 进行操作
-	if err := svr.userSvr.CheckCredential(authCtx); err != nil {
-		log.Error("[Auth][Server] verify auth token", utils.ZapRequestID(reqId), zap.Error(err))
-		return nil, api.NewAuthResponse(apimodel.Code_AuthTokenForbidden)
+	if _, err := svr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
+		resp := api.NewBatchWriteResponseWithMsg(authcommon.ConvertToErrCode(err), err.Error())
+		return resp
+	}
+	return svr.nextSvr.CreateRoles(authCtx.GetRequestContext(), reqs)
+}
+
+// UpdateRoles 批量更新角色
+func (svr *Server) UpdateRoles(ctx context.Context, reqs []*apisecurity.Role) *apiservice.BatchWriteResponse {
+	resources := make([]authcommon.ResourceEntry, 0, len(reqs))
+	for i := range reqs {
+		entry := authcommon.ResourceEntry{
+			Type: apisecurity.ResourceType_Roles,
+			ID:   reqs[i].GetId(),
+		}
+		if saveRule := svr.nextSvr.PolicyHelper().GetRole(reqs[i].GetId()); saveRule != nil {
+			entry.Metadata = saveRule.Metadata
+		}
+		resources = append(resources, entry)
 	}
 
-	attachVal, exist := authCtx.GetAttachment(model.TokenDetailInfoKey)
-	if !exist {
-		log.Error("[Auth][Server] token detail info not exist", utils.ZapRequestID(reqId))
-		return nil, api.NewAuthResponse(apimodel.Code_TokenNotExisted)
+	authCtx := authcommon.NewAcquireContext(
+		authcommon.WithRequestContext(ctx),
+		authcommon.WithOperation(authcommon.Modify),
+		authcommon.WithModule(authcommon.AuthModule),
+		authcommon.WithMethod(authcommon.UpdateAuthRoles),
+		authcommon.WithAccessResources(map[apisecurity.ResourceType][]authcommon.ResourceEntry{
+			apisecurity.ResourceType_Roles: resources,
+		}),
+	)
+
+	if _, err := svr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
+		resp := api.NewBatchWriteResponseWithMsg(authcommon.ConvertToErrCode(err), err.Error())
+		return resp
+	}
+	return svr.nextSvr.UpdateRoles(authCtx.GetRequestContext(), reqs)
+}
+
+// DeleteRoles 批量删除角色
+func (svr *Server) DeleteRoles(ctx context.Context, reqs []*apisecurity.Role) *apiservice.BatchWriteResponse {
+	resources := make([]authcommon.ResourceEntry, 0, len(reqs))
+	for i := range reqs {
+		entry := authcommon.ResourceEntry{
+			Type: apisecurity.ResourceType_Roles,
+			ID:   reqs[i].GetId(),
+		}
+		if saveRule := svr.nextSvr.PolicyHelper().GetRole(reqs[i].GetId()); saveRule != nil {
+			entry.Metadata = saveRule.Metadata
+		}
+		resources = append(resources, entry)
 	}
 
-	operateInfo := attachVal.(auth.OperatorInfo)
-	if isWrite && operateInfo.Disable {
-		log.Error("[Auth][Server] token is disabled", utils.ZapRequestID(reqId),
-			zap.String("operation", authCtx.GetMethod()))
-		return nil, api.NewAuthResponse(apimodel.Code_TokenDisabled)
+	authCtx := authcommon.NewAcquireContext(
+		authcommon.WithRequestContext(ctx),
+		authcommon.WithOperation(authcommon.Modify),
+		authcommon.WithModule(authcommon.AuthModule),
+		authcommon.WithMethod(authcommon.DeleteAuthRoles),
+		authcommon.WithAccessResources(map[apisecurity.ResourceType][]authcommon.ResourceEntry{
+			apisecurity.ResourceType_Roles: resources,
+		}),
+	)
+
+	if _, err := svr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
+		resp := api.NewBatchWriteResponseWithMsg(authcommon.ConvertToErrCode(err), err.Error())
+		return resp
+	}
+	return svr.nextSvr.DeleteRoles(authCtx.GetRequestContext(), reqs)
+}
+
+// GetRoles 查询角色列表
+func (svr *Server) GetRoles(ctx context.Context, query map[string]string) *apiservice.BatchQueryResponse {
+	authCtx := authcommon.NewAcquireContext(
+		authcommon.WithRequestContext(ctx),
+		authcommon.WithOperation(authcommon.Read),
+		authcommon.WithModule(authcommon.AuthModule),
+		authcommon.WithMethod(authcommon.DescribeAuthRoles),
+	)
+
+	if _, err := svr.GetAuthChecker().CheckConsolePermission(authCtx); err != nil {
+		return api.NewAuthBatchQueryResponseWithMsg(authcommon.ConvertToErrCode(err), err.Error())
 	}
 
-	if !operateInfo.IsUserToken {
-		log.Error("[Auth][Server] only user role can access this API", utils.ZapRequestID(reqId))
-		return nil, api.NewAuthResponse(apimodel.Code_OperationRoleForbidden)
-	}
+	checker := svr.GetAuthChecker()
+	ctx = cachetypes.AppendAuthRolePredicate(ctx, func(ctx context.Context, sd *authcommon.Role) bool {
+		return checker.ResourcePredicate(authCtx, &authcommon.ResourceEntry{
+			Type:     apisecurity.ResourceType_Roles,
+			ID:       sd.ID,
+			Metadata: sd.Metadata,
+		})
+	})
 
-	if needOwner && auth.IsSubAccount(operateInfo) {
-		log.Error("[Auth][Server] only admin/owner account can access this API", utils.ZapRequestID(reqId))
-		return nil, api.NewAuthResponse(apimodel.Code_OperationRoleForbidden)
-	}
-
-	return authCtx.GetRequestContext(), nil
+	return svr.nextSvr.GetRoles(ctx, query)
 }

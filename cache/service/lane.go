@@ -18,6 +18,9 @@
 package service
 
 import (
+	"context"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -43,8 +46,8 @@ type LaneCache struct {
 	*types.BaseCache
 	// single .
 	single singleflight.Group
-	// groups name -> *model.LaneGroupProto
-	groups *utils.SyncMap[string, *model.LaneGroupProto]
+	// groups id -> *model.LaneGroupProto
+	rules *utils.SyncMap[string, *model.LaneGroupProto]
 	// serviceRules namespace -> service -> []*model.LaneRuleProto
 	serviceRules *utils.SyncMap[string, *utils.SyncMap[string, *utils.SyncMap[string, *model.LaneGroupProto]]]
 	// revisions namespace -> service -> revision
@@ -55,7 +58,7 @@ type LaneCache struct {
 func (lc *LaneCache) Initialize(c map[string]interface{}) error {
 	lc.serviceRules = utils.NewSyncMap[string, *utils.SyncMap[string, *utils.SyncMap[string, *model.LaneGroupProto]]]()
 	lc.revisions = utils.NewSyncMap[string, *utils.SyncMap[string, string]]()
-	lc.groups = utils.NewSyncMap[string, *model.LaneGroupProto]()
+	lc.rules = utils.NewSyncMap[string, *model.LaneGroupProto]()
 	lc.single = singleflight.Group{}
 	return nil
 }
@@ -113,10 +116,10 @@ func (lc *LaneCache) setLaneRules(items map[string]*model.LaneGroup) (time.Time,
 			lastMtime = item.ModifyTime.Unix()
 		}
 
-		oldVal, exist := lc.groups.Load(item.ID)
+		oldVal, exist := lc.rules.Load(item.ID)
 		if !item.Valid {
 			del++
-			_, _ = lc.groups.Delete(item.ID)
+			_, _ = lc.rules.Delete(item.ID)
 			if exist {
 				lc.processLaneRuleDelete(oldVal, affectSvcs)
 			}
@@ -127,7 +130,7 @@ func (lc *LaneCache) setLaneRules(items map[string]*model.LaneGroup) (time.Time,
 		} else {
 			add++
 		}
-		lc.groups.Store(item.ID, saveVal)
+		lc.rules.Store(item.ID, saveVal)
 		lc.processLaneRuleUpsert(oldVal, saveVal, affectSvcs)
 	}
 	lc.postUpdateRevisions(affectSvcs)
@@ -144,12 +147,8 @@ func (lc *LaneCache) processLaneRuleUpsert(old, item *model.LaneGroupProto, affe
 		waitDelServices[ns][svc] = struct{}{}
 	}
 	removeServiceIfExist := func(ns, svc string) {
-		if _, ok := waitDelServices[ns]; !ok {
-			waitDelServices[ns] = map[string]struct{}{}
-		}
-		if _, ok := waitDelServices[ns][svc]; ok {
-			delete(waitDelServices[ns], svc)
-		}
+		waitDelServices[ns] = map[string]struct{}{}
+		delete(waitDelServices[ns], svc)
 	}
 
 	handle := func(rule *model.LaneGroupProto, serviceOp func(ns, svc string), ruleOp func(string, string, *model.LaneGroupProto)) {
@@ -337,7 +336,7 @@ func (lc *LaneCache) LastMtime() time.Time {
 // Clear .
 func (lc *LaneCache) Clear() error {
 	lc.revisions = utils.NewSyncMap[string, *utils.SyncMap[string, string]]()
-	lc.groups = utils.NewSyncMap[string, *model.LaneGroupProto]()
+	lc.rules = utils.NewSyncMap[string, *model.LaneGroupProto]()
 	lc.serviceRules = utils.NewSyncMap[string, *utils.SyncMap[string, *utils.SyncMap[string, *model.LaneGroupProto]]]()
 	return nil
 }
@@ -353,4 +352,82 @@ func anyToSelector(data *anypb.Any, msg proto.Message) error {
 		return err
 	}
 	return nil
+}
+
+var (
+	laneGroupSort = map[string]func(asc bool, a, b *model.LaneGroupProto) bool{
+		"mtime": func(asc bool, a, b *model.LaneGroupProto) bool {
+			ret := a.ModifyTime.Before(b.ModifyTime)
+			return ret && asc
+		},
+		"id": func(asc bool, a, b *model.LaneGroupProto) bool {
+			ret := a.ID < b.ID
+			return ret && asc
+		},
+		"name": func(asc bool, a, b *model.LaneGroupProto) bool {
+			ret := a.Name < b.Name
+			return ret && asc
+		},
+	}
+)
+
+// Query implements api.LaneCache.
+func (lc *LaneCache) Query(ctx context.Context, args *types.LaneGroupArgs) (uint32, []*model.LaneGroupProto, error) {
+	if err := lc.Update(); err != nil {
+		return 0, nil, err
+	}
+
+	predicates := types.LoadLaneRulePredicates(ctx)
+
+	searchName, hasName := args.Filter["name"]
+	searchId, hasId := args.Filter["id"]
+
+	results := make([]*model.LaneGroupProto, 0, 32)
+
+	lc.rules.ReadRange(func(key string, val *model.LaneGroupProto) {
+		if hasName && !utils.IsWildMatch(val.Name, searchName) {
+			return
+		}
+		if hasId && val.ID != searchId {
+			return
+		}
+
+		for i := range predicates {
+			if !predicates[i](ctx, val) {
+				return
+			}
+		}
+
+		results = append(results, val)
+	})
+
+	sortFunc, ok := laneGroupSort[args.Filter["order_field"]]
+	if !ok {
+		sortFunc = laneGroupSort["mtime"]
+	}
+	asc := "asc" == strings.ToLower(args.Filter["order_type"])
+	sort.Slice(results, func(i, j int) bool {
+		return sortFunc(asc, results[i], results[j])
+	})
+
+	total, ret := lc.toPage(uint32(len(results)), results, args)
+	return total, ret, nil
+}
+
+func (lc *LaneCache) toPage(total uint32, items []*model.LaneGroupProto,
+	args *types.LaneGroupArgs) (uint32, []*model.LaneGroupProto) {
+	if args.Limit == 0 {
+		return total, items
+	}
+	endIdx := args.Offset + args.Limit
+	if endIdx > total {
+		endIdx = total
+	}
+	return total, items[args.Offset:endIdx]
+}
+
+// GetRule implements api.LaneCache.
+func (lc *LaneCache) GetRule(id string) *model.LaneGroup {
+	rule, _ := lc.rules.Load(id)
+	return rule.LaneGroup
 }

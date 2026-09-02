@@ -70,10 +70,12 @@ type stableStore struct {
 	*clientStore
 	*adminStore
 	*toolStore
+	*grayStore
+
 	*userStore
 	*groupStore
 	*strategyStore
-	*grayStore
+	*roleStore
 
 	// 主数据库，可以进行读写
 	master *BaseDB
@@ -270,12 +272,15 @@ func (s *stableStore) newStore() {
 	s.configFileTemplateStore = &configFileTemplateStore{master: s.master, slave: s.slave}
 	s.clientStore = &clientStore{master: s.master, slave: s.slave}
 
+	s.grayStore = &grayStore{master: s.master, slave: s.slave}
+
 	s.adminStore = newAdminStore(s.master)
 	s.toolStore = &toolStore{db: s.master}
+
 	s.userStore = &userStore{master: s.master, slave: s.slave}
 	s.groupStore = &groupStore{master: s.master, slave: s.slave}
 	s.strategyStore = &strategyStore{master: s.master, slave: s.slave}
-	s.grayStore = &grayStore{master: s.master, slave: s.slave}
+	s.roleStore = &roleStore{master: s.master, slave: s.slave}
 }
 
 func buildEtimeStr(enable bool) string {
