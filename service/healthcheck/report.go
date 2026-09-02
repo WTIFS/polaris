@@ -48,6 +48,12 @@ func checkHeartbeatInstance(req *apiservice.Instance) (string, *apiservice.Respo
 
 const max404Count = 3
 
+const heartbeatKeyTTLGrace = time.Minute
+
+func (s *Server) instanceHeartbeatKeyTTL(instance *model.Instance) time.Duration {
+	return time.Duration(getExpireDurationSec(instance.Proto))*time.Second + s.hcOpt.MaxCheckInterval + heartbeatKeyTTLGrace
+}
+
 func (s *Server) checkInstanceExists(ctx context.Context, id string) (int64, *model.Instance, apimodel.Code) {
 	ins := s.instanceCache.GetInstance(id)
 	if ins != nil {
@@ -141,6 +147,9 @@ func (s *Server) baseReport(ctx context.Context, id string, reportReq *plugin.Re
 	count, ins, code := s.checkInstanceExists(ctx, id)
 	checker := s.getHealthChecker(id)
 	reportReq.Count = count + 1
+	if ins != nil {
+		reportReq.ExpireAfter = s.instanceHeartbeatKeyTTL(ins)
+	}
 	err := checker.Report(ctx, reportReq)
 	if nil != ins {
 		event := &model.InstanceEvent{

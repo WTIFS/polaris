@@ -21,6 +21,7 @@ import (
 	"context"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/polarismesh/polaris/common/model"
 )
@@ -28,9 +29,10 @@ import (
 // ReportRequest report heartbeat request
 type ReportRequest struct {
 	QueryRequest
-	LocalHost  string
-	CurTimeSec int64
-	Count      int64
+	LocalHost   string
+	CurTimeSec  int64
+	Count       int64
+	ExpireAfter time.Duration
 }
 
 // CheckRequest check heartbeat request

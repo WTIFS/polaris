@@ -17,6 +17,8 @@
 
 package redispool
 
+import "time"
+
 // Resp ckv任务结果
 type Resp struct {
 	Value       string
@@ -47,7 +49,7 @@ type Pool interface {
 	// MGet 使用连接池，向redis发起MGet请求
 	MGet(keys []string) *Resp
 	// Set 使用连接池，向redis发起Set请求
-	Set(id string, redisObj RedisObject) *Resp
+	Set(id string, redisObj RedisObject, expiration time.Duration) *Resp
 	// Del 使用连接池，向redis发起Del请求
 	Del(id string) *Resp
 	// RecoverTimeSec the time second record when recover

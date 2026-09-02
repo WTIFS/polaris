@@ -20,6 +20,7 @@ package base
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -60,6 +61,9 @@ func NewCacheStatics(statis *CacheCallStatis) *CacheStatics {
 
 func (c *CacheStatics) Add(ac metrics.CallMetric) {
 	index := fmt.Sprintf("%v", ac.Protocol)
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
 	item, exist := c.statis[index]
 	if !exist {
 		item = &CacheCallStatisItem{
@@ -72,15 +76,11 @@ func (c *CacheStatics) Add(ac metrics.CallMetric) {
 		item.hitCount += int64(ac.Times)
 	} else {
 		item.missCount += int64(ac.Times)
-
 	}
 }
 
 func (c *CacheStatics) printStatics(staticsSlice []*CacheCallStatisItem, startStr string) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
 	msg := fmt.Sprintf("Statis %s:\n", startStr)
-
 	msg += fmt.Sprintf(
 		"%-48v|%12v|%12v|%12v|\n", "", "HitCount", "MissCount", "HitRate")
 
@@ -98,7 +98,9 @@ func (c *CacheStatics) printStatics(staticsSlice []*CacheCallStatisItem, startSt
 
 // log and print the statics messages
 func (c *CacheStatics) log() {
+	c.mutex.Lock()
 	if len(c.statis) == 0 {
+		c.mutex.Unlock()
 		return
 	}
 
@@ -107,8 +109,9 @@ func (c *CacheStatics) log() {
 		duplicateStatis = append(duplicateStatis, item)
 	}
 	c.statis = make(map[string]*CacheCallStatisItem)
+	c.mutex.Unlock()
 
-	go c.printStatics(duplicateStatis, commontime.Time2String(time.Now()))
+	c.printStatics(duplicateStatis, commontime.Time2String(time.Now()))
 }
 
 // CacheCallStatis 接口调用统计
@@ -124,6 +127,12 @@ func NewCacheCallStatis(ctx context.Context) (*CacheCallStatis, error) {
 	value.cacheStatics = NewCacheStatics(value)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				commonlog.Errorf("[CacheCallStatis] panic recovered : %v. STACK: %s", r, debug.Stack())
+			}
+		}()
+
 		for {
 			select {
 			case <-ctx.Done():

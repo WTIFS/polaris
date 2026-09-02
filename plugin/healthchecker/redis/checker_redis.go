@@ -46,6 +46,9 @@ const (
 	Servers = "servers"
 	// CountSep separator to divide server and count
 	CountSep = "|"
+	// defaultHeartbeatKeyTTL bounds orphaned heartbeat keys when the caller
+	// cannot provide a health-check-specific expiration.
+	defaultHeartbeatKeyTTL = 10 * time.Minute
 )
 
 // RedisHealthChecker 心跳检测redis
@@ -178,7 +181,11 @@ func (r *RedisHealthChecker) Report(ctx context.Context, request *plugin.ReportR
 	}
 
 	log.Debugf("[Health Check][RedisCheck]redis set key is %s, value is %s", request.InstanceId, *value)
-	resp := r.hbPool.Set(request.InstanceId, value)
+	expireAfter := request.ExpireAfter
+	if expireAfter <= 0 {
+		expireAfter = defaultHeartbeatKeyTTL
+	}
+	resp := r.hbPool.Set(request.InstanceId, value, expireAfter)
 	if resp.Err != nil {
 		log.Errorf("[Health Check][RedisCheck]addr:%s:%d, id:%s, set redis err:%s",
 			request.Host, request.Port, request.InstanceId, resp.Err)

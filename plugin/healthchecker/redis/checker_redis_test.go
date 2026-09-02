@@ -33,6 +33,7 @@ import (
 type mockPool struct {
 	setValues      map[string]map[string]bool
 	itemValues     map[string]string
+	setExpires     map[string]time.Duration
 	compatible     bool
 	recoverTimeSec int64
 }
@@ -41,6 +42,7 @@ type mockPool struct {
 func (m *mockPool) Start() {
 	m.setValues = make(map[string]map[string]bool)
 	m.itemValues = make(map[string]string)
+	m.setExpires = make(map[string]time.Duration)
 }
 
 // Sdd 使用连接池，向redis发起Sdd请求
@@ -95,9 +97,10 @@ func (m *mockPool) MGet(id []string) *redispool.Resp {
 }
 
 // Set 使用连接池，向redis发起Set请求
-func (m *mockPool) Set(id string, redisObj redispool.RedisObject) *redispool.Resp {
+func (m *mockPool) Set(id string, redisObj redispool.RedisObject, expiration time.Duration) *redispool.Resp {
 	value := redisObj.Serialize(m.compatible)
 	m.itemValues[id] = value
+	m.setExpires[id] = expiration
 	return &redispool.Resp{
 		Value:      value,
 		Exists:     true,
@@ -145,6 +148,7 @@ func TestReportAndCheck(t *testing.T) {
 	}
 	err := checker.Report(context.Background(), reportReq)
 	assert.Nil(t, err)
+	assert.Equal(t, defaultHeartbeatKeyTTL, pool.setExpires[instanceId])
 
 	queryResp, err := checker.Query(context.Background(), &reportReq.QueryRequest)
 	assert.Nil(t, err)
