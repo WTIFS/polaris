@@ -34,6 +34,10 @@ func toClientId(instanceId string) string {
 	return clientPrefix + instanceId
 }
 
+func (s *Server) clientHeartbeatKeyTTL() time.Duration {
+	return time.Duration(expireTtlCount)*s.hcOpt.ClientCheckTtl + s.hcOpt.ClientCheckInterval + heartbeatKeyTTLGrace
+}
+
 func (s *Server) doReportByClient(ctx context.Context, client *apiservice.Client) *apiservice.Response {
 	if len(s.checkers) == 0 {
 		return api.NewResponse(apimodel.Code_HealthCheckNotOpen)
@@ -47,8 +51,9 @@ func (s *Server) doReportByClient(ctx context.Context, client *apiservice.Client
 			InstanceId: toClientId(client.GetId().GetValue()),
 			Host:       client.GetHost().GetValue(),
 		},
-		LocalHost:  s.localHost,
-		CurTimeSec: time.Now().Unix() - s.timeAdjuster.GetDiff(),
+		LocalHost:   s.localHost,
+		CurTimeSec:  time.Now().Unix() - s.timeAdjuster.GetDiff(),
+		ExpireAfter: s.clientHeartbeatKeyTTL(),
 	}
 	err := checker.Report(ctx, request)
 	if err != nil {

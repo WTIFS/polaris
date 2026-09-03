@@ -88,6 +88,7 @@ type Task struct {
 	id       string
 	ids      []string
 	value    string
+	expire   time.Duration
 	members  []string
 	respChan chan *Resp
 }
@@ -180,8 +181,8 @@ func (p *redisPool) MGet(keys []string) *Resp {
 	return p.handleTaskWithRetries(task)
 }
 
-// Sdd 使用连接池，向redis发起Sdd请求
-func (p *redisPool) Sdd(id string, members []string) *Resp {
+// Sadd uses the connection pool to issue an SADD request to Redis.
+func (p *redisPool) Sadd(id string, members []string) *Resp {
 	if err := p.checkRedisDead(); err != nil {
 		return &Resp{Err: err}
 	}
@@ -207,7 +208,7 @@ func (p *redisPool) Srem(id string, members []string) *Resp {
 }
 
 // Set 使用连接池，向redis发起Set请求
-func (p *redisPool) Set(id string, redisObj RedisObject) *Resp {
+func (p *redisPool) Set(id string, redisObj RedisObject, expiration time.Duration) *Resp {
 	if err := p.checkRedisDead(); err != nil {
 		return &Resp{Err: err}
 	}
@@ -215,6 +216,7 @@ func (p *redisPool) Set(id string, redisObj RedisObject) *Resp {
 		taskType: Set,
 		id:       id,
 		value:    redisObj.Serialize(p.config.Compatible),
+		expire:   expiration,
 	}
 	return p.handleTaskWithRetries(task)
 }
@@ -464,7 +466,7 @@ func (p *redisPool) afterHandleTask(startTime time.Time, command string, task *T
 func (p *redisPool) doHandleTask(task *Task, piper redis.Pipeliner) redis.Cmder {
 	switch task.taskType {
 	case Set:
-		return piper.Set(context.Background(), toRedisKey(task.id, p.config.Compatible), task.value, 0)
+		return piper.Set(context.Background(), toRedisKey(task.id, p.config.Compatible), task.value, task.expire)
 	case Del:
 		return piper.Del(context.Background(), toRedisKey(task.id, p.config.Compatible))
 	case Sadd:

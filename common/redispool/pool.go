@@ -17,6 +17,8 @@
 
 package redispool
 
+import "time"
+
 // Resp ckv任务结果
 type Resp struct {
 	Value       string
@@ -38,8 +40,8 @@ type RedisObject interface {
 type Pool interface {
 	// Start 启动ckv连接池工作
 	Start()
-	// Sdd 使用连接池，向redis发起Sdd请求
-	Sdd(id string, members []string) *Resp
+	// Sadd uses the connection pool to issue an SADD request to Redis.
+	Sadd(id string, members []string) *Resp
 	// Srem 使用连接池，向redis发起Srem请求
 	Srem(id string, members []string) *Resp
 	// Get 使用连接池，向redis发起Get请求
@@ -47,7 +49,7 @@ type Pool interface {
 	// MGet 使用连接池，向redis发起MGet请求
 	MGet(keys []string) *Resp
 	// Set 使用连接池，向redis发起Set请求
-	Set(id string, redisObj RedisObject) *Resp
+	Set(id string, redisObj RedisObject, expiration time.Duration) *Resp
 	// Del 使用连接池，向redis发起Del请求
 	Del(id string) *Resp
 	// RecoverTimeSec the time second record when recover

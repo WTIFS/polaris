@@ -30,7 +30,6 @@ import (
 	"github.com/polarismesh/polaris/common/model"
 	"github.com/polarismesh/polaris/common/redispool"
 	commontime "github.com/polarismesh/polaris/common/time"
-	"github.com/polarismesh/polaris/common/utils"
 	"github.com/polarismesh/polaris/plugin"
 )
 
@@ -42,10 +41,11 @@ const (
 	PluginName = "heartbeatRedis"
 	// Sep separator to divide id and timestamp
 	Sep = ":"
-	// Servers key to manage hb servers
-	Servers = "servers"
 	// CountSep separator to divide server and count
 	CountSep = "|"
+	// defaultHeartbeatKeyTTL bounds orphaned heartbeat keys when the caller
+	// cannot provide a health-check-specific expiration.
+	defaultHeartbeatKeyTTL = 10 * time.Minute
 )
 
 // RedisHealthChecker 心跳检测redis
@@ -81,16 +81,7 @@ func (r *RedisHealthChecker) Initialize(c *plugin.ConfigEntry) error {
 	r.hbPool.Start()
 	r.checkPool = redispool.NewRedisPool(ctx, &config, r.statis)
 	r.checkPool.Start()
-	if err = r.registerSelf(); err != nil {
-		return fmt.Errorf("fail to register %s to redis, err is %v", utils.LocalHost, err)
-	}
 	return nil
-}
-
-func (r *RedisHealthChecker) registerSelf() error {
-	localhost := utils.LocalHost
-	resp := r.checkPool.Sdd(Servers, []string{localhost})
-	return resp.Err
 }
 
 // Destroy plugin destroy
@@ -178,7 +169,11 @@ func (r *RedisHealthChecker) Report(ctx context.Context, request *plugin.ReportR
 	}
 
 	log.Debugf("[Health Check][RedisCheck]redis set key is %s, value is %s", request.InstanceId, *value)
-	resp := r.hbPool.Set(request.InstanceId, value)
+	expireAfter := request.ExpireAfter
+	if expireAfter <= 0 {
+		expireAfter = defaultHeartbeatKeyTTL
+	}
+	resp := r.hbPool.Set(request.InstanceId, value, expireAfter)
 	if resp.Err != nil {
 		log.Errorf("[Health Check][RedisCheck]addr:%s:%d, id:%s, set redis err:%s",
 			request.Host, request.Port, request.InstanceId, resp.Err)
